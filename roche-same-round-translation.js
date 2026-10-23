@@ -1,4 +1,4 @@
-/* Roche 同轮翻译 v2.0.1 — 沿用主题的原生翻译样式。
+/* Roche 同轮翻译 v2.1.0 — 同一主请求附带译文；本地记录已有调用。
  * 仅通过 contextProvider 加入正常聊天请求；不调用 ai.chat / fetch。
  * 英文译文随角色正常回复返回，HTML 注释携带结果，本地显示到原消息。
  */
@@ -17,6 +17,49 @@
   try { state = JSON.parse(localStorage.getItem(key) || '{}'); } catch { state = {}; }
   if (!state || typeof state !== 'object' || Array.isArray(state)) state = {};
   let stopped = false, busy = false;
+  const traceKey = 'roche.sameRoundTranslation.requests.v1';
+  let traces = [];
+  try { const stored = JSON.parse(localStorage.getItem(traceKey) || '[]'); if (Array.isArray(stored)) traces = stored.slice(-30); } catch {}
+  const originalFetch = window.fetch;
+  function noteRequest(url, raw) {
+    if (stopped || !/(?:\/messages|chat\/completions|\/api\/chat|\/api\/schedule)(?:[/?]|$)/.test(url)) return;
+    let body;
+    try { body = JSON.parse(raw); } catch { return; }
+    const payload = body.payload || body;
+    if (!payload.model || !Array.isArray(payload.messages)) return;
+    const system = payload.messages.filter(m => m.role === 'system').map(m => typeof m.content === 'string' ? m.content : '').join('\n');
+    const combined = system.includes('<!--RRT:');
+    const background = /本轮后台动态任务|后台动态任务|\[Posting Rhythm\]|\[Interaction Rule\]/.test(system);
+    const kind = combined ? '主聊天：已带我方译文要求' : background ? '后台活动任务' : '其他任务（尚不能确定用途）';
+    traces.push({ time: new Date().toLocaleString(), model: String(payload.model).slice(0, 160), kind });
+    traces = traces.slice(-30);
+    try { localStorage.setItem(traceKey, JSON.stringify(traces)); } catch {}
+    if (panel.open) renderTrace();
+  }
+  // 原请求原样传给网页。只读取副本，不保存地址、密钥、提示词或聊天正文。
+  function observedFetch(input, init) {
+    try {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input?.url || '';
+      if (typeof init?.body === 'string') noteRequest(url, init.body);
+      else if (input instanceof Request && !init?.body) input.clone().text().then(raw => noteRequest(url, raw)).catch(() => {});
+    } catch {}
+    return Reflect.apply(originalFetch, this, arguments);
+  }
+  window.fetch = observedFetch;
+  const panel = document.createElement('details');
+  panel.className = 'rrt-request-status';
+  panel.style.cssText = 'position:fixed;right:12px;top:110px;z-index:2147483000;max-width:85vw;font:12px/1.5 system-ui;color:#222;background:#fffffff2;border:1px solid #ddd;border-radius:12px;padding:7px 10px;box-shadow:0 2px 12px #0001';
+  const toggle = document.createElement('summary');
+  toggle.textContent = '同轮翻译 · 调用记录';
+  const traceBody = document.createElement('div');
+  traceBody.style.cssText = 'max-height:45vh;overflow:auto;white-space:pre-wrap;margin-top:8px';
+  function renderTrace() {
+    traceBody.textContent = 'v2.1.0 · 仅记录加载后网页已有的请求，不发测试请求。\n服务器自身的转发、重试和托管任务可能不可见。\n\n' +
+      (traces.length ? traces.slice().reverse().map(t => `${t.time}\n${t.model}\n${t.kind}`).join('\n\n') : '暂无记录。不需要为了检查而额外发消息。');
+  }
+  panel.append(toggle, traceBody);
+  panel.addEventListener('toggle', () => { if (panel.open) renderTrace(); });
+  document.body.append(panel);
   const save = () => { try { localStorage.setItem(key, JSON.stringify(state)); } catch {} };
   const clean = s => String(s || '').replace(/<!--[\s\S]*?-->/g, '').replace(/『翻译：[\s\S]*?』/g, '').trim();
   function paint() {
@@ -58,7 +101,7 @@
     }
   }
   async function contextProvider(ctx) {
-    if (stopped || !ctx.conversationId || ctx.conversationType === 'group') return '';
+    if (stopped || !ctx.conversationId || ctx.conversationType !== 'direct' || ctx.source && ctx.source !== 'online') return '';
     const conversationId = String(ctx.conversationId);
     const messages = await api.memory.getShortTerm({ conversationId, limit: 80 });
     if (stopped || !Array.isArray(messages)) return '';
@@ -107,7 +150,7 @@
     } catch (error) { console.warn('[同轮翻译] 本地读取未完成', error); }
     finally { busy = false; }
   }
-  window.RochePlugin.register({ id: 'roche-same-round-translation', name: '我方英文·同轮翻译', version: '2.0.1', chat: { contextProvider } });
+  window.RochePlugin.register({ id: 'roche-same-round-translation', name: '我方英文·同轮翻译', version: '2.1.0', chat: { contextProvider } });
   const timer = setInterval(collect, 1500);
   let scheduled = false;
   const observer = new MutationObserver(() => {
@@ -116,10 +159,12 @@
     requestAnimationFrame(() => { scheduled = false; paint(); });
   });
   observer.observe(document.body, { childList: true, subtree: true });
-  window[NAME] = { version: '2.0.1', destroy() {
+  window[NAME] = { version: '2.1.0', destroy() {
     stopped = true;
     clearInterval(timer);
     observer.disconnect();
+    if (window.fetch === observedFetch) window.fetch = originalFetch;
+    panel.remove();
     document.querySelectorAll('.rrt-native').forEach(n => n.remove());
   } };
   paint();
