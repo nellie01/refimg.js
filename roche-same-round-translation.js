@@ -1,4 +1,4 @@
-/* Roche 同轮翻译 v2.0 — 粘贴到 JS 插件入口，无需 API 设置。
+/* Roche 同轮翻译 v2.0.1 — 沿用主题的原生翻译样式。
  * 仅通过 contextProvider 加入正常聊天请求；不调用 ai.chat / fetch。
  * 英文译文随角色正常回复返回，HTML 注释携带结果，本地显示到原消息。
  */
@@ -19,9 +19,6 @@
   let stopped = false, busy = false;
   const save = () => { try { localStorage.setItem(key, JSON.stringify(state)); } catch {} };
   const clean = s => String(s || '').replace(/<!--[\s\S]*?-->/g, '').replace(/『翻译：[\s\S]*?』/g, '').trim();
-  const style = document.createElement('style');
-  style.textContent = '.rrt-english{display:block;font-size:13px;line-height:1.4;margin-top:5px;white-space:pre-wrap;overflow-wrap:anywhere;color:inherit;opacity:.94}.rrt-english::before{content:"EN · ";font-size:10px;opacity:.7}';
-  document.head.append(style);
   function paint() {
     if (stopped) return;
     for (const batch of Object.values(state)) {
@@ -34,12 +31,27 @@
         const copy = target.cloneNode(true);
         copy.querySelectorAll('.rrt-english,.translation-block').forEach(n => n.remove());
         if (clean(copy.textContent).replace(/\s+/g, ' ') !== item.source.replace(/\s+/g, ' ')) continue;
+        // 使用与网页 Io 渲染器相同的层级，主题 CSS 会统一字体和外置译文间距。
         let output = target.querySelector('.rrt-english');
         if (!output) {
+          if (target.querySelector('.translation-block:not(.rrt-native)')) continue;
+          let wrapper = target.firstElementChild;
+          if (!wrapper || wrapper.tagName !== 'SPAN') {
+            wrapper = document.createElement('span');
+            while (target.firstChild) wrapper.append(target.firstChild);
+            target.append(wrapper);
+          }
+          const details = document.createElement('details');
+          details.className = 'translation-block inline rrt-native';
+          details.open = true;
+          const summary = document.createElement('summary');
+          summary.className = 'translation-toggle';
+          summary.textContent = '译';
           output = document.createElement('span');
-          output.className = 'rrt-english';
+          output.className = 'translation-content rrt-english';
           output.lang = 'en';
-          target.append(output);
+          details.append(summary, output);
+          wrapper.append(details);
         }
         if (output.textContent !== item.english) output.textContent = item.english;
       }
@@ -95,7 +107,7 @@
     } catch (error) { console.warn('[同轮翻译] 本地读取未完成', error); }
     finally { busy = false; }
   }
-  window.RochePlugin.register({ id: 'roche-same-round-translation', name: '我方英文·同轮翻译', version: '2.0.0', chat: { contextProvider } });
+  window.RochePlugin.register({ id: 'roche-same-round-translation', name: '我方英文·同轮翻译', version: '2.0.1', chat: { contextProvider } });
   const timer = setInterval(collect, 1500);
   let scheduled = false;
   const observer = new MutationObserver(() => {
@@ -104,12 +116,11 @@
     requestAnimationFrame(() => { scheduled = false; paint(); });
   });
   observer.observe(document.body, { childList: true, subtree: true });
-  window[NAME] = { version: '2.0.0', destroy() {
+  window[NAME] = { version: '2.0.1', destroy() {
     stopped = true;
     clearInterval(timer);
     observer.disconnect();
-    style.remove();
-    document.querySelectorAll('.rrt-english').forEach(n => n.remove());
+    document.querySelectorAll('.rrt-native').forEach(n => n.remove());
   } };
   paint();
   collect();
