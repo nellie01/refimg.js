@@ -1,4 +1,4 @@
-/* Roche 我方翻译独立挂载 v3.0.2
+/* Roche 我方翻译独立挂载 v3.0.3
  * 替换同轮翻译插件。翻译单独计费，每轮合并一次；未挂载时关闭。
  * 仅使用用户选定的现有 API 预设；不修改其他 API 挂载。
  */
@@ -9,13 +9,13 @@
   window.RocheTranslationBinding?.destroy();
   const api = window.Roche;
   if (!api?.memory?.getShortTerm || !api?.ai?.chat || !window.RochePlugin?.register) return;
-  const VERSION = '3.0.2', KEY = 'roche.translationBinding.v3';
+  const VERSION = '3.0.3', KEY = 'roche.translationBinding.v3';
   const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; } };
   const data = read(KEY, {});
   if (!Array.isArray(data.jobs)) data.jobs = [];
   if (typeof data.presetId !== 'string') data.presetId = '';
   data.enabled = data.enabled === true;
-  let stopped = false, busy = false, preparing = Promise.resolve(), presets = [], dbPromise;
+  let stopped = false, busy = false, preparing = Promise.resolve(), presets = [];
   let card, observer, scheduled = false, controller;
   let status = '未挂载时关闭。翻译会单独调用一次 API。';
   // A reload during a billed call has an unknown outcome. Never silently resend it.
@@ -24,12 +24,42 @@
   const clean = s => String(s || '').replace(/<!--[\s\S]*?-->/g, '').replace(/『翻译：[\s\S]*?』/g, '').trim();
   const normal = s => clean(s).replace(/\s+/g, ' ');
   async function loadPresets() {
-    // This is the same local preset reader imported by the deployed app.
-    // It never sends the preset names or keys to another service.
-    dbPromise ||= import(new URL('/assets/db-layer-BKAMbvMs.js', location.origin).href);
-    const db = await dbPromise;
-    const list = await db.g();
-    if (!Array.isArray(list)) throw Error('无法读取 API 预设，请刷新网页或更新插件。');
+    // The app's preset store is Roche_db/presets in both verified deployments.
+    // Read it directly in a readonly transaction; asset hashes/exports may change.
+    const list = await new Promise((resolve, reject) => {
+      let db, settled = false;
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true; clearTimeout(timeout); db?.close();
+        if (error) reject(error); else resolve(result);
+      };
+      const timeout = setTimeout(() => finish(Error('读取本机 API 预设超时，请关闭再打开挂载页面。')), 10000);
+      try {
+        const request = indexedDB.open('Roche_db'); // No version: never upgrade the app database.
+        request.onupgradeneeded = () => {
+          request.transaction.abort(); // If absent, do not create a new database.
+          finish(Error('本机还没有 API 预设数据库，请先打开网页原有 API 设置。'));
+        };
+        request.onerror = () => finish(Error('无法读取本机 API 预设，请重新打开小手机。'));
+        request.onblocked = () => finish(Error('本机预设正在更新，请稍后点击刷新预设列表。'));
+        request.onsuccess = () => {
+          db = request.result;
+          if (settled) { db.close(); return; }
+          db.onversionchange = () => { db.close(); finish(Error('预设数据已更新，请刷新预设列表。')); };
+          try {
+            if (!db.objectStoreNames.contains('presets')) throw Error('未找到 API 预设，请先在原有 API 设置保存预设。');
+            const transaction = db.transaction(['presets'], 'readonly');
+            const result = transaction.objectStore('presets').getAll();
+            let records;
+            result.onsuccess = () => { records = result.result; };
+            result.onerror = () => finish(Error('读取 API 预设失败，请点击刷新预设列表重试。'));
+            transaction.oncomplete = () => finish(null, records);
+            transaction.onerror = transaction.onabort = () => finish(Error('读取 API 预设中断，请点击刷新预设列表重试。'));
+          } catch (error) { finish(error); }
+        };
+      } catch { finish(Error('当前浏览器暂时无法读取本机 API 预设。')); }
+    });
+    if (!Array.isArray(list)) throw Error('本机 API 预设格式不正确，请在原有 API 设置重新保存。');
     presets = list;
     return list;
   }
@@ -79,6 +109,10 @@
     for (const preset of presets) {
       const option = document.createElement('option'); option.value = String(preset.id);
       option.textContent = String(preset.name || '未命名') + (preset.model ? ' · ' + preset.model : ''); select.append(option);
+    }
+    if (data.enabled && data.presetId && !presets.some(p => String(p.id) === data.presetId)) {
+      const pending = document.createElement('option'); pending.value = data.presetId;
+      pending.textContent = '已选预设尚未载入，请刷新列表'; select.append(pending);
     }
     select.value = data.enabled ? data.presetId : '';
   }
