@@ -1,4 +1,4 @@
-/* Roche 我方翻译独立挂载 v3.0.1
+/* Roche 我方翻译独立挂载 v3.0.2
  * 替换同轮翻译插件。翻译单独计费，每轮合并一次；未挂载时关闭。
  * 仅使用用户选定的现有 API 预设；不修改其他 API 挂载。
  */
@@ -9,7 +9,7 @@
   window.RocheTranslationBinding?.destroy();
   const api = window.Roche;
   if (!api?.memory?.getShortTerm || !api?.ai?.chat || !window.RochePlugin?.register) return;
-  const VERSION = '3.0.1', KEY = 'roche.translationBinding.v3';
+  const VERSION = '3.0.2', KEY = 'roche.translationBinding.v3';
   const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; } };
   const data = read(KEY, {});
   if (!Array.isArray(data.jobs)) data.jobs = [];
@@ -40,7 +40,7 @@
     output.style.setProperty('font-family', '-apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", Arial, sans-serif', 'important');
     if (style) for (const prop of ['font-size', 'font-style', 'line-height', 'letter-spacing', 'color', '-webkit-text-fill-color', 'text-shadow', '-webkit-text-stroke-width', '-webkit-text-stroke-color']) output.style.setProperty(prop, style.getPropertyValue(prop), 'important');
     // Approved draft: original size, slightly stronger than regular, each line flush right.
-    output.style.setProperty('font-weight', '450', 'important');
+    output.style.setProperty('font-weight', '500', 'important');
     output.style.setProperty('text-align', 'right', 'important');
   }
   function paint() {
