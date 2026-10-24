@@ -1,4 +1,4 @@
-/* Roche 同轮翻译 v2.1.0 — 同一主请求附带译文；本地记录已有调用。
+/* Roche 同轮翻译 v2.1.1 — 同一主请求附带译文；本地记录已有调用。
  * 仅通过 contextProvider 加入正常聊天请求；不调用 ai.chat / fetch。
  * 英文译文随角色正常回复返回，HTML 注释携带结果，本地显示到原消息。
  */
@@ -27,10 +27,12 @@
     try { body = JSON.parse(raw); } catch { return; }
     const payload = body.payload || body;
     if (!payload.model || !Array.isArray(payload.messages)) return;
-    const system = payload.messages.filter(m => m.role === 'system').map(m => typeof m.content === 'string' ? m.content : '').join('\n');
+    const textOf = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(block => typeof block?.text === 'string' ? block.text : '').join('\n') : '';
+    const system = [textOf(payload.system), ...payload.messages.filter(m => m.role === 'system').map(m => textOf(m.content))].join('\n');
     const combined = system.includes('<!--RRT:');
     const background = /本轮后台动态任务|后台动态任务|\[Posting Rhythm\]|\[Interaction Rule\]/.test(system);
-    const kind = combined ? '主聊天：已带我方译文要求' : background ? '后台活动任务' : '其他任务（尚不能确定用途）';
+    const translation = /You are a translator\b|You are (?:a |an )?(?:professional )?translation (?:engine|assistant)|你是(?:一名|一个|专业的)?(?:专业)?翻译(?:助手|引擎|器)|只(?:输出|返回)译文/i.test(system);
+    const kind = combined ? '主聊天：已带我方译文要求' : background ? '后台活动任务' : translation ? '独立翻译请求（不是同轮主回复）' : '其他任务（尚不能确定用途）';
     traces.push({ time: new Date().toLocaleString(), model: String(payload.model).slice(0, 160), kind });
     traces = traces.slice(-30);
     try { localStorage.setItem(traceKey, JSON.stringify(traces)); } catch {}
@@ -54,7 +56,7 @@
   const traceBody = document.createElement('div');
   traceBody.style.cssText = 'max-height:45vh;overflow:auto;white-space:pre-wrap;margin-top:8px';
   function renderTrace() {
-    traceBody.textContent = 'v2.1.0 · 仅记录加载后网页已有的请求，不发测试请求。\n服务器自身的转发、重试和托管任务可能不可见。\n\n' +
+    traceBody.textContent = 'v2.1.1 · 仅记录加载后网页已有的请求，不发测试请求。\n服务器自身的转发、重试和托管任务可能不可见。\n\n' +
       (traces.length ? traces.slice().reverse().map(t => `${t.time}\n${t.model}\n${t.kind}`).join('\n\n') : '暂无记录。不需要为了检查而额外发消息。');
   }
   panel.append(toggle, traceBody);
@@ -96,8 +98,17 @@
           details.append(summary, output);
           wrapper.append(details);
         }
+        matchTranslationStyle(output);
         if (output.textContent !== item.english) output.textContent = item.english;
       }
+    }
+  }
+  function matchTranslationStyle(output) {
+    const peer = document.querySelector('.chat-bubble--received > .message-text .translation-content');
+    const computed = peer ? getComputedStyle(peer) : null;
+    output.style.setProperty('font-family', '-apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", Arial, sans-serif', 'important');
+    for (const property of ['font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-shadow', '-webkit-text-stroke-width', '-webkit-text-stroke-color', 'color', '-webkit-text-fill-color']) {
+      if (computed) output.style.setProperty(property, computed.getPropertyValue(property), 'important');
     }
   }
   async function contextProvider(ctx) {
@@ -150,7 +161,7 @@
     } catch (error) { console.warn('[同轮翻译] 本地读取未完成', error); }
     finally { busy = false; }
   }
-  window.RochePlugin.register({ id: 'roche-same-round-translation', name: '我方英文·同轮翻译', version: '2.1.0', chat: { contextProvider } });
+  window.RochePlugin.register({ id: 'roche-same-round-translation', name: '我方英文·同轮翻译', version: '2.1.1', chat: { contextProvider } });
   const timer = setInterval(collect, 1500);
   let scheduled = false;
   const observer = new MutationObserver(() => {
@@ -159,7 +170,7 @@
     requestAnimationFrame(() => { scheduled = false; paint(); });
   });
   observer.observe(document.body, { childList: true, subtree: true });
-  window[NAME] = { version: '2.1.0', destroy() {
+  window[NAME] = { version: '2.1.1', destroy() {
     stopped = true;
     clearInterval(timer);
     observer.disconnect();
