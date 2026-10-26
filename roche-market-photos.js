@@ -1,12 +1,12 @@
-/* Roche 商城 AI 商品图 v1.5.2
+/* Roche 商城 AI 商品图 v1.6.0
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
- * 不调用聊天、翻译或搜图接口。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
+ * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
  */
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.5.2',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.6.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -82,6 +82,99 @@
    t.oncomplete=()=>{const products=rows.map(p=>({...p,_category:p._category||cats.get(p.categoryId)?.name||'',_worldview:p._worldview||(p._kind==='eats'?nativeEats.worldview:cats.get(p.categoryId)?.worldview)||''}));indexCatalog(products,definitions,cartItems);finish(products);};t.onerror=t.onabort=()=>finish([]);
   };}catch{finish([]);}
  });}
+ // Gift attachments use Roche's native image-message path (not a text URL).
+ const giftStarted=Date.now(),giftSeen=new Set();
+ let giftCore=null,giftTimer,giftBusy=false,giftStatus='正在连接礼物图片功能…',giftFailures=[];
+ const giftCopy=value=>JSON.parse(JSON.stringify(value));
+ function giftNotice(text){giftStatus=text;api?.ui?.toast?.(text);}
+ function giftEnabled(){return pref.giftVision!==false;}
+ function nativeGiftDB(store,key,change){return new Promise((resolve,reject)=>{
+  let d,done=false;const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);d?.close();error?reject(error):resolve(value);},timer=setTimeout(()=>finish(Error('订单图片存储响应超时。')),8000);
+  const request=indexedDB.open('Roche_db');request.onupgradeneeded=()=>{request.transaction.abort();finish(Error('未找到 Roche 数据库。'));};request.onerror=request.onblocked=()=>finish(Error('订单图片存储不可用。'));
+  request.onsuccess=()=>{d=request.result;if(done){d.close();return;}if(!d.objectStoreNames.contains(store))return finish(Error('系统订单存储结构已变化。'));const tx=d.transaction(store,change?'readwrite':'readonly'),s=tx.objectStore(store),q=s.get(key);let result;q.onsuccess=()=>{result=q.result;if(result&&change){try{result=change(result);s.put(result);}catch(error){tx.abort();finish(error);}}};tx.oncomplete=()=>finish(null,result);tx.onerror=tx.onabort=()=>finish(tx.error||Error('订单图片保存失败。'));};
+ });}
+ async function giftJournal(value){await new Promise((resolve,reject)=>{const tx=db.transaction('settings','readwrite');tx.objectStore('settings').put(value);tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(Error('礼物配图进度保存失败。'));});}
+ function giftProductKey(item){
+  const title=normal(item.title),id=String(item.id??''),kind=item.type==='eats'?'eats':null,category=String(item.categoryId||item.category?.id||'');
+  const matches=new Map();
+  for(const p of [...catalog,...cartCatalog])if(id&&String(p.id)===id&&p.title===title&&(!kind||p.kind===kind)&&(!category||p.categoryId===category))matches.set(p.key,p.key);
+  for(const j of jobs.values()){let parts;try{parts=JSON.parse(j.key);}catch{continue;}if(parts[0]==='product'&&id&&String(parts[3])===id&&normal(j.title)===title&&(!kind||parts[1]===kind)&&(!category||String(parts[2])===category))matches.set(j.key,j.key);}
+  if(matches.size===1)return [...matches.keys()][0];
+  // Ambiguous same-name products must never receive somebody else's image.
+  if(matches.size>1)return '';
+  const sameTitle=catalog.filter(p=>p.title===title);return sameTitle.length<=1&&(!sameTitle.length||String(sameTitle[0].id)===id)&&jobs.get(title)?.hasImage?title:'';
+ }
+ async function giftAsset(item){const key=giftProductKey(item);if(!key)return null;return await read('images',key)||await read('images',normal(item.title));}
+ async function giftImageData(asset){
+  let blob=asset.blob;const remote=safeImage(asset.hostedUrl||asset.url);
+  if(!blob){if(!remote)throw Error('这件商品的原图不可用。');const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);try{const response=await fetch(remote,{signal:ctrl.signal,credentials:'omit',referrerPolicy:'no-referrer'});if(!response.ok)throw Error('商品图下载失败。');blob=await response.blob();}finally{clearTimeout(timer);}}
+  if(!/^image\/(png|jpeg|webp)$/.test(blob.type)||blob.size>12*1024*1024)throw Error('商品图格式或大小不适合聊天附件。');
+  // Local cached assets already use 512px; remote originals are reduced too.
+  const object=URL.createObjectURL(blob),im=new Image(),canvas=document.createElement('canvas');
+  try{await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('商品图读取超时。')),15000);im.onload=()=>{clearTimeout(timer);resolve();};im.onerror=()=>{clearTimeout(timer);reject(Error('商品图读取失败。'));};im.src=object;});
+   const scale=Math.min(1,512/Math.max(im.naturalWidth,im.naturalHeight));canvas.width=Math.max(1,Math.round(im.naturalWidth*scale));canvas.height=Math.max(1,Math.round(im.naturalHeight*scale));const ctx=canvas.getContext('2d');if(!ctx)throw Error('无法准备聊天商品图。');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(im,0,0,canvas.width,canvas.height);const small=await timedBlob(canvas,'image/jpeg',.82);if(!small)throw Error('商品图压缩失败。');return {content:await dataUrlFor(small),display:remote.startsWith('https:')?remote:''};
+  }finally{im.onload=im.onerror=null;im.src='';canvas.width=canvas.height=1;URL.revokeObjectURL(object);}
+ }
+ function giftLive(chat,id){return giftCore.v.messages?.[chat]?.find(m=>m.id===id);}
+ async function attachGift(message,retry=false){
+  if(!navigator.locks?.request){giftNotice('此浏览器缺少礼物附图锁，已暂停自动发送以避免重复。');return;}
+  return navigator.locks.request('rmai-gift:'+message.conversationId+':'+message.id,{ifAvailable:true},lock=>lock?attachGiftLocked(message,retry):undefined);
+ }
+ async function attachGiftLocked(message,retry=false){
+  const chat=message.conversationId,key='gift:'+chat+':'+message.id;
+  let journal=await read('settings',key);
+  if(journal&&!retry)return;
+  if(stopped||!giftEnabled()||message.isRecalled||!message.isMe||message.type!=='checkout_gift')return;
+  const live=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);
+  if(!live||live.isRecalled)return;
+  journal={...journal,key,chat,messageId:message.id,state:'sending',updatedAt:Date.now(),done:journal?.done||[]};await giftJournal(journal);
+  let sent=0,missing=0;const errors=[];
+  const items=live.cardData?.items||[];
+  for(let index=0;index<items.length;index++){
+   if(stopped||!giftEnabled())break;
+   const item=items[index];if(item.type==='ticket'||journal.done.includes(index))continue;
+   try{
+    const current=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);if(!current||current.isRecalled)break;
+    const id=message.id+'_rmai_gift_'+index;
+    let attached=await nativeGiftDB('messages',id);
+    if(!attached){const inMemory=giftLive(chat,id);if(inMemory){await giftCore.c4(chat,giftCopy(inMemory));attached=await nativeGiftDB('messages',id);}}
+    if(!attached){const asset=await giftAsset(item);if(!asset){missing++;continue;}const image=await giftImageData(asset);
+     if(stopped||!giftEnabled()||giftLive(chat,message.id)?.isRecalled)break;
+     const photo={id,conversationId:chat,type:'image',isMe:true,senderId:live.senderId,timestamp:Date.now(),content:image.content,text:'[礼物商品图] '+normal(item.title)+'（订单 '+String(live.cardData?.orderId||'')+'）。这是我赠送的这件商品的 AI 示意图。',isVisionRecognized:false,rmaiGift:{messageId:live.id,orderId:live.cardData?.orderId,index,display:image.display}};
+     await giftCore.E(chat,photo);attached=await nativeGiftDB('messages',id);if(!attached)throw Error('图片消息尚未成功保存，请稍后重试。');
+    }
+    if(attached.isRecalled){journal.done.push(index);continue;}
+    const display=attached.rmaiGift?.display||attached.content;
+    const latest=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);
+    if(!latest||latest.isRecalled)break;
+    const updated=giftCopy(latest);if(updated.cardData?.items?.[index]){updated.cardData.items[index].image=display;await giftCore.c4(chat,updated);}
+    const orderId=latest.cardData?.orderId;
+    if(orderId){const order=await nativeGiftDB('market_orders',orderId,order=>{const target=order.items?.[index];if(target&&String(target.id)===String(item.id)&&normal(target.title)===normal(item.title))target.image=display;return order;});
+     if(order)for(const list of Object.values(giftCore.v.market?.orders||{})){const target=list.find(o=>o.id===orderId);if(target)target.items=order.items;}
+    }
+    journal.done.push(index);await giftJournal(journal);sent++;
+   }catch(error){errors.push(normal(item.title)+'：'+(error.name==='AbortError'?'图片下载超时':String(error.message||'图片发送失败')));}
+  }
+  journal.state=errors.length||missing?'partial':stopped||!giftEnabled()?'paused':'done';journal.error=errors.join('\n')+(missing?'\n'+missing+' 件商品尚无可用配图，生成后可手动补发。':'');journal.updatedAt=Date.now();await giftJournal(journal);
+  giftFailures=giftFailures.filter(j=>j.key!==key);if(journal.state!=='done')giftFailures.push(journal);
+  if(!stopped)giftNotice(sent?'礼物已附 '+sent+' 张商品图，下次聊天会交给识图模型。'+(journal.error?'部分图片未附上，可在商品图片设置中补发。':''):journal.error?'礼物部分配图未发送，请在商品图片设置中查看。':'礼物图片已处理。');
+ }
+ async function scanGiftMessages(){if(stopped||!ready||!giftCore||giftBusy||!giftEnabled())return;giftBusy=true;
+  try{for(const list of Object.values(giftCore.v.messages||{}))for(const message of list.slice(-40)){if(message.type!=='checkout_gift'||!message.isMe||message.isRecalled||Number(message.timestamp)<giftStarted||giftSeen.has(message.id))continue;giftSeen.add(message.id);await attachGift(message);if(stopped)break;}}
+  catch{giftNotice('礼物配图处理未完成，请在商品图片设置中查看。');}finally{giftBusy=false;}
+ }
+ async function initGiftVision(){
+  try{const urls=[...document.querySelectorAll('script[src],link[href]')].map(n=>n.src||n.href).concat(performance.getEntriesByType('resource').map(r=>r.name));
+   const url=urls.find(s=>{try{const u=new URL(s,location.href);return u.origin===location.origin&&/\/ai-core-C8ElbRIq\.js$/.test(u.pathname);}catch{return false;}});
+   if(!url)throw Error('系统聊天模块版本暂不兼容，未发送图片。');if(!navigator.locks?.request)throw Error('此浏览器不支持礼物附图锁，未启用自动附图。');
+   const core=await import(url);if(!core.v?.messages||typeof core.E!=='function'||typeof core.c4!=='function')throw Error('系统图片消息接口已变化，未发送图片。');
+   if(stopped)return;giftCore=core;giftFailures=(await read('settings')).filter(j=>String(j.key).startsWith('gift:')&&j.state!=='done');giftStatus='已连接：新赠送订单会附上商品原图，供聊天模型识图。';giftTimer=setInterval(scanGiftMessages,1000);scanGiftMessages();
+  }catch(error){giftStatus=String(error.message||'礼物图片功能未连接。');}
+ }
+ function giftControls(box){const section=node('div','rmai-gift-settings'),label=node('label','','赠送时附上商品图'),toggle=node('input');toggle.type='checkbox';toggle.checked=giftEnabled();toggle.addEventListener('change',()=>{pref.giftVision=toggle.checked;preferences();});label.prepend(toggle);section.append(label,node('p','',giftStatus),node('p','','仅处理启用后新送出的礼物；每件商品附一张原生图片消息，不重新生图。聊天识图使用你现有的聊天模型，可能增加图片输入用量。图片最长边 512px；系统完成识图后，可通过系统图床同步聊天图片。'));
+  for(const j of giftFailures){const status=node('p','',j.error||'上次附图中断，可继续未完成部分。'),retry=button('补发这份礼物未完成的图片',async()=>{if(giftBusy||stopped)return;giftBusy=true;retry.disabled=true;try{const msg=giftLive(j.chat,j.messageId)||await nativeGiftDB('messages',j.messageId);if(!msg||msg.isRecalled)throw Error('原赠送消息已删除或撤回，未补发。');await attachGift(msg,true);setText(status,giftStatus);}catch(error){setText(status,error.message);}finally{giftBusy=false;retry.disabled=false;}});retry.disabled=!giftCore;section.append(status,retry);}box.append(section);
+ }
+
  const kinds=[[/榴莲|durian/i,'durian dessert'],[/冰淇淋|冰激凌|冰酪|gelato/i,'ice cream dessert'],[/糯米.*芒果|mango sticky/i,'mango sticky rice'],[/蛋糕|提拉米苏|cake|tiramisu/i,'cake dessert'],[/披萨|pizza/i,'pizza'],[/汉堡|burger/i,'burger'],[/寿司|sushi/i,'sushi'],[/面|ramen|pasta/i,'noodle or pasta dish'],[/牛排|steak/i,'steak dish'],[/奶茶|咖啡|coffee|tea/i,'drink'],[/洗发|shampoo/i,'shampoo bottle'],[/沐浴|body wash/i,'body wash bottle'],[/香水|perfume/i,'perfume bottle'],[/牙膏|toothpaste/i,'toothpaste tube'],[/护肤|精华|skincare/i,'skincare cosmetic'],[/音响|音箱|speaker|olufsen/i,'audio speaker'],[/耳机|headphone|airpod/i,'headphones'],[/switch/i,'Nintendo Switch accessory'],[/手机|iphone|smartphone/i,'smartphone'],[/电脑|laptop|macbook/i,'laptop computer'],[/相机|camera/i,'camera'],[/包|handbag/i,'bag'],[/鞋|shoe/i,'shoes'],[/衣|衫|裙|coat|shirt|dress/i,'clothing'],[/项链|戒指|jewel/i,'jewelry'],[/花束|bouquet/i,'flower bouquet']];
  async function promptFor(rec){const p=rec.product||(await productRows()).find(x=>rowKey(x)===rec.key||(rec.key===normal(rec.title)&&normal(x.title)===rec.key))||{},kind=kinds.find(([r])=>r.test(rec.title))?.[1]||'the described product',text=normal(p.detail||p.description||rec.description).slice(0,1800),food=p.type==='eats'||/dessert|ice cream|rice|pizza|burger|sushi|dish|drink/.test(kind);
   return ['Create one clean commercial '+(food?'food':'product')+' photograph for an online shop.','Main subject: '+kind+'.','Exact product name (Chinese or English): '+rec.title+'.',p._category?'Product category: '+p._category:'',p.seller?'Seller or brand context: '+p.seller:'','World and style context: '+normal(p._worldview||generationSettings().worldview).slice(0,1800),text?'Product details: '+text:'','Depict this exact generated product and its components, following its category and description. Show the complete item with natural proportions.',food?'Freshly prepared food on a simple white plate, appetizing texture, pure white background, soft daylight.':'One main product on a pure white background (#FFFFFF), soft studio lighting, realistic materials, subtle contact shadow.','Square composition. Centered subject, about 75 percent of the frame, generous clean margins.','No people, hands, shop interiors, storefronts, diagrams, price labels, extra captions, watermarks or collage. No invented large brand logos.'].filter(Boolean).join('\n');
@@ -190,13 +283,14 @@
  function settings(requestedScope){const box=sheet('商品图片'),summary=node('p'),start=button('',()=>{},'rmai-action rmai-primary'),progress=node('p','rmai-progress'),message=node('p'),stats=node('p'),storage=node('p','','正在统计本地图片占用…'),pause=button('',()=>{if(batchPaused){resumeQueue(settingsView?.scope||null);return;}batchPaused=true;panelMessage='后续任务已暂停，当前这张继续等待结果。';for(const r of records)paint(r).catch(()=>{});tool();},'rmai-action'),validationStatus=node('p');const scope=requestedScope?.kind?requestedScope:currentCategory(),scopeSelect=node('select'),scopeLabel=node('label','rmai-scope-label','配图范围'),regenerate=button('',()=>{},'rmai-action');scopeSelect.setAttribute('aria-label','商品图片类目范围');scopeLabel.append(scopeSelect);settingsView={box,summary,start,progress,message,stats,pause,storage,validationStatus,scope,scopeSelect,regenerate};const view=settingsView;box.append(scopeLabel,summary,start,regenerate,progress,pause,message,validationStatus);scopeSelect.addEventListener('change',()=>{view.scope=categoryDefs.find(c=>scopeKey(c)===scopeSelect.value)||null;list.open=false;updateControls(view);});categorySelect(view);productRows().then(()=>{if(view.box.isConnected){categorySelect(view);updateControls(view);}}).catch(()=>{});
   const mode=node('select');mode.setAttribute('aria-label','商品图片生成方式');for(const [value,text]of [['batch','自动：新商品生成后整批配图'],['manual','手动：一键生成当前批次']]){const o=node('option','',text);o.value=value;mode.append(o);}mode.value=pref.mode;mode.addEventListener('change',async()=>{mode.disabled=true;try{for(const p of await productRows()){const k=rowKey(p);known.add(normal(p.title));seenProducts.add(k);}pref.mode=mode.value;queueScope=null;preferences();if(pref.mode==='manual'){for(const [key,t]of pending)if(!t.manual){pending.delete(key);paintKey(key);}}panelMessage=pref.mode==='manual'?'已切换手动配图，尚未发出的自动任务已取消。可点击上方按钮安排本批图片。':'已开启新增商品自动配图。';tool();}catch{panelMessage='设置暂未保存，请重试。';tool();}finally{mode.disabled=false;}});box.append(node('p','','生成方式'),mode,node('p','','一键将这一批商品加入队列，依次调用所选商品生图服务。每张图片对应一个生图任务，费用按所选服务商和模型计算。选择类目后按该类目实际商品数安排，不使用全局数量上限。'),node('p','',providerLabel()),button('独立生图接口设置',providerPanel,'rmai-action'),stats,storage,node('p','','新图保存为最长边 512px 的压缩图。靠近屏幕才载入，滑远后释放图片资源；旧图继续复用。此处只统计本插件商品图，不包含聊天、相册等数据。可在系统“图床与图片同步”里将商品图转存至 ImgBB；原生接口返回外链时会直接保存链接。'));
   if(api?.ui?.openApp)box.append(button('打开系统设置 · API 挂载',()=>{close();api.ui.openApp('settings');},'rmai-action'));
+  giftControls(box);
   const list=node('details','rmai-item-list'),label=node('summary','','单件图片与未完成任务'),items=node('div');list.append(label,items);list.addEventListener('toggle',()=>{if(!list.open)return;items.replaceChildren();const current=settingsView?.scope,plan=current?categoryPlan(current):batchPlan(),all=new Map(plan.all.map(r=>[r.key,r])),keys=current?new Set(plan.all.flatMap(r=>[r.key,r.legacyKey])):null;for(const j of jobs.values())if(['failed','unknown'].includes(j.status)&&(!keys||keys.has(j.key))&&!all.has(j.key))all.set(j.key,{key:j.key,title:j.title});for(const r of all.values()){const j=effectiveJob(r),entry=button('',()=>itemPanel(r),'rmai-item');entry.append(node('span','',r.title),node('span','',j?.status==='running'?'生成中':pending.has(r.key)?'已排队':j?.status==='unknown'?'结果待确认':j?.status==='failed'?'查看原因':j?.hasImage?'已保存':'未配图'));items.append(entry);}});box.append(list);tool();
  }
  async function itemPanel(r){const box=sheet(r.title),j=effectiveJob(r);previewKey=r.key;if(j?.hasImage){try{const src=await imageUrl(r.key);if(src&&box.isConnected){const im=node('img');im.src=src;im.alt=r.title;box.append(im);}}catch{}}if(!box.isConnected)return;box.append(node('p','',providerLabel()+'。提示词只包含商品资料，不额外调用聊天模型。'));if(j?.error)box.append(node('p','',j.error));if(j?.status==='unknown')box.append(node('p','','上次任务可能已经产生费用，但本机没有确认结果。请先查看生图后台，再决定是否重新生成。'));const input=node('textarea');input.setAttribute('aria-label','商品图片提示词');input.placeholder='正在整理商品资料…';box.append(input);promptFor(r).then(p=>{if(box.isConnected&&!input.value)input.value=p;}).catch(()=>{if(box.isConnected)input.placeholder='请填写商品图描述';});const act=button(j?.hasImage?'重新生成一张 · 可能计费':'生成这一件 · 可能计费',()=>{enqueue(r,input.value,true,!!j?.hasImage);close();},'rmai-action rmai-primary');act.disabled=j?.status==='running';box.append(act);}
  const observer=new MutationObserver(ms=>{if(ms.some(m=>!m.target.closest?.('.rmai-owned')&&(m.type==='attributes'||[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned')))))schedule(ms.some(m=>m.type==='childList'&&!m.target.closest?.('.rmai-owned')&&[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned'))));});document.addEventListener('click',onCategoryNavigation,true);observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
- window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy)db?.close();}};
+ window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy)db?.close();}};
  try{window.RochePlugin?.register({id:ID,name:'商城 AI 商品图 · 独立生图接口',version:VERSION});}catch{}
  discover();
- (async()=>{try{db=await database();if(stopped){db.close();return;}const savedValidation=await read('settings','validation');if(savedValidation)validation=savedValidation;if(['checking','generating','queued'].includes(validation.state))validation={...validation,state:'unverified',message:'上次验证没有确认结果，请先查看服务商记录，不会自动重新生图。'};const savedProvider=await read('settings','provider');if(savedProvider&&['system','preset','custom'].includes(savedProvider.source))provider={...provider,...savedProvider};for(const j of await read('jobs')){jobs.set(j.key,j.status==='running'&&j.owner!==owner?{...j,status:'unknown',error:'页面曾在生图时关闭或刷新。上次任务结果未确认，不会自动重新调用。'}:j);}for(const p of await productRows()){const k=rowKey(p);known.add(normal(p.title));seenProducts.add(k);}if(stopped){db.close();return;}preferences();ready=true;fillBindingOptions();for(const r of records){r.isNew=false;paint(r).catch(()=>{});near.observe(r.img);}schedule();}catch(error){panelMessage=String(error?.message||'图片缓存不可用');for(const r of records)note(r,'图片缓存暂不可用');tool();}})();
+ (async()=>{try{db=await database();if(stopped){db.close();return;}const savedValidation=await read('settings','validation');if(savedValidation)validation=savedValidation;if(['checking','generating','queued'].includes(validation.state))validation={...validation,state:'unverified',message:'上次验证没有确认结果，请先查看服务商记录，不会自动重新生图。'};const savedProvider=await read('settings','provider');if(savedProvider&&['system','preset','custom'].includes(savedProvider.source))provider={...provider,...savedProvider};for(const j of await read('jobs')){jobs.set(j.key,j.status==='running'&&j.owner!==owner?{...j,status:'unknown',error:'页面曾在生图时关闭或刷新。上次任务结果未确认，不会自动重新调用。'}:j);}for(const p of await productRows()){const k=rowKey(p);known.add(normal(p.title));seenProducts.add(k);}if(stopped){db.close();return;}preferences();ready=true;initGiftVision();fillBindingOptions();for(const r of records){r.isNew=false;paint(r).catch(()=>{});near.observe(r.img);}schedule();}catch(error){panelMessage=String(error?.message||'图片缓存不可用');for(const r of records)note(r,'图片缓存暂不可用');tool();}})();
 })();
 
