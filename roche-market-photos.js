@@ -1,329 +1,93 @@
-/* Roche 商城自动配图 v0.1.0
- * 自动搜索 Openverse 公开图片；不调用 Roche.ai、不读取 API 密钥。
- * 只替换商城占位图，不改商品数据库、购买和聊天逻辑。
- * 搜索词会发送到 api.openverse.org；结果为商品示意图，非实物保证。
+/* Roche 商城 AI 商品图 v1.0.0
+ * 仅调用 Roche.ai.generateImage；沿用系统生图模型和密钥。
+ * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
+ * 不调用聊天、翻译或搜图接口。图片保存在本机 IndexedDB。
  */
 (() => {
-  'use strict';
-  window.RocheMarketPhotos?.destroy();
-  const VERSION = '0.1.0', KEY = 'roche.marketPhotos.v1';
-  const HOST = 'https://api.openverse.org/v1/images/';
-  // Vetted category examples keep the starter experience usable; unfamiliar goods still use online search.
-  const starter = {"durian ice cream":[{"url":"https://live.staticflickr.com/7520/15471240144_3a6d5e102a_z.jpg","fallback":"https://live.staticflickr.com/7520/15471240144_3a6d5e102a_z.jpg","title":"Durian Ice Cream","creator":"brownpau","source":"https://www.flickr.com/photos/44124483743@N01/15471240144","license":"by","licenseUrl":"https://creativecommons.org/licenses/by/2.0/","score":30}],"shampoo bottle":[{"url":"https://upload.wikimedia.org/wikipedia/commons/9/93/Head_%26_Shoulders_shampoo_bottle.jpg","fallback":"https://upload.wikimedia.org/wikipedia/commons/9/93/Head_%26_Shoulders_shampoo_bottle.jpg","title":"File:Head & Shoulders shampoo bottle.jpg（洗发水品类示意）","creator":"רנדום","source":"https://commons.wikimedia.org/w/index.php?curid=10119831","license":"by-sa","licenseUrl":"https://creativecommons.org/licenses/by-sa/3.0/","score":30}],"Bang Olufsen":[{"url":"https://cdn.dummyjson.com/product-images/mobile-accessories/amazon-echo-plus/thumbnail.webp","fallback":"https://cdn.dummyjson.com/product-images/mobile-accessories/amazon-echo-plus/thumbnail.webp","title":"Amazon Echo Plus（音箱品类示意，非 B&O 实物）","creator":"DummyJSON demo product catalog","source":"https://dummyjson.com/products/99","license":"","licenseUrl":"","score":30}]};
-  let state;
-  try { state = JSON.parse(localStorage.getItem(KEY)) || {}; } catch { state = {}; }
-  state.items = state.items && typeof state.items === 'object' ? state.items : {};
-  state.queries = state.queries && typeof state.queries === 'object' ? state.queries : {};
-  state.enabled = state.enabled !== false;
-  if (state.revision !== 5) { state.items = {}; state.queries = {}; state.revision = 5; }
-  let stopped = false, scheduled = false, busy = false, nextAt = 0, modal, panel;
-  const records = new Set(), byImage = new WeakMap(), queue = new Map(), requests = new Set();
-  const pendingQueries = new Map();
-  let searchTail = Promise.resolve();
-  const normalize = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
-  const safeUrl = value => { try { const u = new URL(value); return u.protocol === 'https:' ? u.href : ''; } catch { return ''; } };
-  const save = () => {
-    for (const key of ['items', 'queries']) {
-      const rows = Object.entries(state[key]);
-      if (rows.length > 500) state[key] = Object.fromEntries(rows.sort((a,b) => (b[1].time || 0) - (a[1].time || 0)).slice(0, 400));
-    }
-    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
-  };
-  const el = (tag, cls, text) => { const node = document.createElement(tag); if (cls) node.className = cls; if (text) node.textContent = text; return node; };
-  const button = (text, action, cls = '') => { const b = el('button', cls, text); b.type = 'button'; b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); action(); }); return b; };
-  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const rules = [
-    [/榴莲|durian/i, /冰|ice|gelato|sorbet/i, 'durian ice cream'],
-    [/糯米|sticky rice/i, /芒果|mango/i, 'mango sticky rice'],
-    [/提拉米苏|tiramisu/i, null, 'tiramisu'], [/冰淇淋|冰激凌|冰酪|gelato|ice cream/i, null, 'ice cream'],
-    [/蛋糕|cake/i, null, 'cake dessert'], [/榴莲|durian/i, null, 'durian dessert'],
-    [/甜品|甜点|dessert/i, null, 'dessert'], [/披萨|比萨|pizza/i, null, 'pizza'],
-    [/汉堡|burger/i, null, 'hamburger'], [/寿司|sushi/i, null, 'sushi'],
-    [/拉面|ramen/i, null, 'ramen'], [/牛排|steak/i, null, 'steak dish'],
-    [/意面|意大利面|pasta/i, null, 'pasta dish'], [/沙拉|salad/i, null, 'salad'],
-    [/炸鸡|fried chicken/i, null, 'fried chicken'], [/火锅|hot pot/i, null, 'hot pot food'],
-    [/饺子|dumpling/i, null, 'dumplings'], [/咖啡|coffee/i, null, 'coffee cup'],
-    [/奶茶|bubble tea/i, null, 'bubble tea'], [/巧克力|chocolate/i, null, 'chocolate'],
-    [/三明治|sandwich/i, null, 'sandwich'], [/烤肉|烧烤|barbecue/i, null, 'barbecue food'],
-    [/红酒|葡萄酒|wine/i, null, 'wine bottle'], [/香槟|champagne/i, null, 'champagne bottle'],
-    [/洗发|shampoo/i, null, 'shampoo bottle'], [/沐浴|shower gel|body wash/i, null, 'shower gel bottle'],
-    [/牙膏|toothpaste/i, null, 'toothpaste tube'], [/香水|perfume/i, null, 'perfume bottle'],
-    [/护肤|精华|面霜|skincare/i, null, 'cosmetics skincare'], [/口红|lipstick/i, null, 'lipstick'],
-    [/吹风机|hair dryer/i, null, 'hair dryer'], [/剃须|shaver|razor/i, null, 'electric shaver'],
-    [/耳机|headphone|earbuds|airpods/i, null, 'headphones'], [/音响|音箱|扬声器|speaker/i, null, 'loudspeaker'],
-    [/switch/i, /支架|stand/i, 'Nintendo Switch stand'], [/switch/i, null, 'Nintendo Switch console'],
-    [/相机|camera/i, null, 'digital camera'], [/手机|iphone|smartphone/i, null, 'smartphone'],
-    [/电脑|laptop|macbook/i, null, 'laptop'], [/键盘|keyboard/i, null, 'computer keyboard'],
-    [/手表|watch/i, null, 'wristwatch'], [/项链|necklace/i, null, 'necklace jewelry'],
-    [/戒指|ring/i, null, 'jewelry ring'], [/耳环|earring/i, null, 'earrings jewelry'],
-    [/包包|手袋|handbag/i, null, 'handbag'], [/背包|backpack/i, null, 'backpack'],
-    [/运动鞋|球鞋|sneakers/i, null, 'sneakers shoes'], [/鞋|shoes/i, null, 'shoes'],
-    [/衬衫|shirt/i, null, 'shirt clothing'], [/外套|大衣|coat|jacket/i, null, 'coat fashion'],
-    [/裙|dress/i, null, 'dress fashion'], [/毛衣|sweater/i, null, 'sweater'],
-    [/裤|trousers|jeans/i, null, 'trousers'], [/雨伞|umbrella/i, null, 'umbrella'],
-    [/花束|鲜花|bouquet/i, null, 'flower bouquet'], [/蜡烛|candle/i, null, 'candle'],
-    [/玩偶|毛绒|plush/i, null, 'plush toy'], [/书籍|小说|图书|book/i, null, 'books'],
-    [/眼镜|sunglasses/i, null, 'sunglasses'], [/家具|沙发|sofa/i, null, 'sofa furniture']
-  ];
-  function queriesFor(title) {
-    if (/bang\s*(?:&|and)\s*olufsen|b&o/i.test(title) && /音响|音箱|speaker/i.test(title)) return ['Bang Olufsen','loudspeaker enclosure'];
-    for (const [a,b,q] of rules) if (a.test(title) && (!b || b.test(title))) {
-      // Category keywords are intentionally used: generated model numbers may not exist.
-      return [q];
-    }
-    const clean = title.replace(/[\[\]{}<>"'|\\]/g, ' ').replace(/\b\d+(?:\.\d+)?\s*(?:ml|g|kg|cm|mm)\b/gi, '').replace(/旗舰版|豪华版|限定版|套装|精选|高端|正品/g, ' ').trim();
-    return [normalize(clean).slice(0, 90)];
+ 'use strict';
+ window.RocheMarketPhotos?.destroy();
+ const VERSION='1.0.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+ let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
+ pref.mode=pref.mode==='new'?'new':'manual';pref.autoLimit=[2,4,8,12].includes(pref.autoLimit)?pref.autoLimit:4;
+ const known=new Set(Array.isArray(pref.known)?pref.known:[]),jobs=new Map(),records=new Set(),byImg=new WeakMap(),images=new Map(),pending=new Map();
+ let stopped=false,ready=false,scheduled=false,working=false,toolbar,modal,db,autoCount=0,currentTitle='',panelMessage='';
+ const normal=s=>String(s||'').normalize('NFKC').replace(/\s+/g,' ').trim();
+ const node=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text)n.textContent=text;return n;};
+ const button=(text,fn,cls='')=>{const n=node('button',cls,text);n.type='button';n.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();fn();});return n;};
+ function preferences(){pref.known=[...known].slice(-6000);try{localStorage.setItem(PREF,JSON.stringify(pref));}catch{}}
+ function safeImage(s){s=String(s||'');if(/^data:image\/(png|jpeg|webp);base64,/i.test(s))return s;try{const u=new URL(s);return u.protocol==='https:'?u.href:'';}catch{return '';}}
+ function database(){return new Promise((resolve,reject)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=()=>{r.result.createObjectStore('jobs',{keyPath:'key'});r.result.createObjectStore('images',{keyPath:'key'});};r.onerror=()=>reject(Error('本机图片缓存无法打开，请检查浏览器存储空间。'));r.onblocked=()=>reject(Error('图片缓存被其他页面占用，请关闭其他 Roche 页面后刷新。'));r.onsuccess=()=>{const d=r.result;d.onversionchange=()=>d.close();resolve(d);};});}
+ function read(store,key){return new Promise((resolve,reject)=>{const t=db.transaction(store,'readonly'),r=key===undefined?t.objectStore(store).getAll():t.objectStore(store).get(key);let value;r.onsuccess=()=>{value=r.result;};t.oncomplete=()=>resolve(value);t.onerror=t.onabort=()=>reject(t.error||Error('读取缓存失败'));});}
+ function putJob(job){return new Promise((resolve,reject)=>{const t=db.transaction('jobs','readwrite');t.objectStore('jobs').put(job);t.oncomplete=()=>{jobs.set(job.key,job);resolve();};t.onerror=t.onabort=()=>reject(t.error||Error('任务状态未能保存，未发起新的生图。'));});}
+ function claim(task){return new Promise((resolve,reject)=>{
+   const t=db.transaction('jobs','readwrite'),s=t.objectStore('jobs'),r=s.get(task.rec.key);let claimed=null;
+   r.onsuccess=()=>{const old=r.result;
+    if(old?.hasImage&&!task.force){jobs.set(old.key,old);return;}
+    if(old?.status==='running'&&!task.retryUnknown){jobs.set(old.key,{...old,status:'unknown'});return;}
+    claimed={...old,key:task.rec.key,title:task.rec.title,status:'running',owner,started:Date.now(),hasImage:!!old?.hasImage,error:''};s.put(claimed);
+   };
+   t.oncomplete=()=>{if(claimed)jobs.set(claimed.key,claimed);resolve(claimed);};t.onerror=t.onabort=()=>reject(t.error||Error('无法保存生图任务，未发起请求。'));
+ });}
+ function saveImage(job,asset){return new Promise((resolve,reject)=>{const t=db.transaction(['jobs','images'],'readwrite');t.objectStore('jobs').put(job);t.objectStore('images').put(asset);t.oncomplete=()=>{jobs.set(job.key,job);resolve();};t.onerror=t.onabort=()=>reject(t.error||Error('图片已生成，但缓存保存失败。请先腾出浏览器空间，不要重复生成。'));});}
+ async function productRows(){return new Promise(resolve=>{
+  let done=false,d;const finish=rows=>{if(done)return;done=true;clearTimeout(timer);d?.close();resolve(rows);},timer=setTimeout(()=>finish([]),5000);
+  try{const r=indexedDB.open('Roche_db');r.onupgradeneeded=()=>{r.transaction.abort();finish([]);};r.onerror=r.onblocked=()=>finish([]);r.onsuccess=()=>{d=r.result;if(done){d.close();return;}const stores=['market_products','market_eats_categories'].filter(s=>d.objectStoreNames.contains(s));if(!stores.length)return finish([]);const t=d.transaction(stores,'readonly'),rows=[];for(const s of stores){const q=t.objectStore(s).getAll();q.onsuccess=()=>{for(const p of q.result||[])s==='market_eats_categories'?rows.push(...(p.items||[])):rows.push(p);};}t.oncomplete=()=>finish(rows);t.onerror=t.onabort=()=>finish([]);};}catch{finish([]);}
+ });}
+ const kinds=[[/榴莲|durian/i,'durian dessert'],[/冰淇淋|冰激凌|冰酪|gelato/i,'ice cream dessert'],[/糯米.*芒果|mango sticky/i,'mango sticky rice'],[/蛋糕|提拉米苏|cake|tiramisu/i,'cake dessert'],[/披萨|pizza/i,'pizza'],[/汉堡|burger/i,'burger'],[/寿司|sushi/i,'sushi'],[/面|ramen|pasta/i,'noodle or pasta dish'],[/牛排|steak/i,'steak dish'],[/奶茶|咖啡|coffee|tea/i,'drink'],[/洗发|shampoo/i,'shampoo bottle'],[/沐浴|body wash/i,'body wash bottle'],[/香水|perfume/i,'perfume bottle'],[/牙膏|toothpaste/i,'toothpaste tube'],[/护肤|精华|skincare/i,'skincare cosmetic'],[/音响|音箱|speaker|olufsen/i,'audio speaker'],[/耳机|headphone|airpod/i,'headphones'],[/switch/i,'Nintendo Switch accessory'],[/手机|iphone|smartphone/i,'smartphone'],[/电脑|laptop|macbook/i,'laptop computer'],[/相机|camera/i,'camera'],[/包|handbag/i,'bag'],[/鞋|shoe/i,'shoes'],[/衣|衫|裙|coat|shirt|dress/i,'clothing'],[/项链|戒指|jewel/i,'jewelry'],[/花束|bouquet/i,'flower bouquet']];
+ async function promptFor(rec){const rows=await productRows(),p=rows.find(x=>normal(x.title)===rec.key)||{},kind=kinds.find(([r])=>r.test(rec.title))?.[1]||'the described product',text=normal(p.detail||p.description||rec.description).slice(0,1800),food=/dessert|ice cream|rice|pizza|burger|sushi|dish|drink/.test(kind);
+  return ['Create one polished commercial '+(food?'food':'product')+' photograph for an online shop.','Main subject: '+kind+'.','Exact product name (Chinese or English): '+rec.title+'.',text?'Product details: '+text:'','Depict the specific product and components described above. Show the complete item with natural proportions.',food?'Freshly prepared food, appetizing texture, simple elegant plate or bowl, soft daylight.':'One main product, clean neutral ivory background, soft studio lighting, realistic materials, subtle contact shadow.','Square composition. Centered subject, about 75 percent of the frame, generous clean margins.','No people, hands, shop interiors, storefronts, diagrams, price labels, extra captions, watermarks or collage. No invented large brand logos.'].filter(Boolean).join('\n');
+ }
+ async function compress(raw){
+  const src=safeImage(typeof raw==='string'?raw:raw?.url||raw?.imageUrl||raw?.data?.[0]?.url);if(!src)throw Error('系统没有返回图片。请检查 Roche 系统生图开关、模型和额度；本插件不会自动重试。');
+  let blob;try{const r=await fetch(src,{credentials:'omit',referrerPolicy:'no-referrer'});if(!r.ok)throw Error();blob=await r.blob();}catch{if(src.startsWith('https://'))return {url:src};throw Error('图片已返回，但保存失败。请先检查浏览器存储，不要重复生成。');}
+  if(!blob.type.startsWith('image/'))throw Error('系统返回的内容不是有效图片。');
+  const object=URL.createObjectURL(blob);try{const img=new Image();await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(Error('生图结果无法解码。'));img.src=object;});const scale=Math.min(1,768/Math.max(img.naturalWidth,img.naturalHeight)),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(img.naturalWidth*scale));canvas.height=Math.max(1,Math.round(img.naturalHeight*scale));const c=canvas.getContext('2d');if(!c)throw Error('当前浏览器无法处理商品图片。');c.fillStyle='#faf9f6';c.fillRect(0,0,canvas.width,canvas.height);c.drawImage(img,0,0,canvas.width,canvas.height);const small=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.88));return {blob:small||blob,width:canvas.width,height:canvas.height};}finally{URL.revokeObjectURL(object);}
+ }
+ async function imageUrl(key){if(images.has(key))return images.get(key).url;const a=await read('images',key);if(!a)return '';const url=a.blob?URL.createObjectURL(a.blob):safeImage(a.url);images.set(key,{url,object:!!a.blob});return url;}
+ function placeholder(src){if(!src.startsWith('data:image/svg+xml'))return false;try{const s=src.includes(';base64,')?atob(src.split(',')[1]):decodeURIComponent(src.slice(src.indexOf(',')+1));return s.includes('MARKET #')||(s.includes('#f1f5f9')&&s.includes('<text')&&s.includes('<path'));}catch{return false;}}
+ const css=node('style');css.id='rmai-style';css.textContent=`
+ .market-app .rmai-media{position:relative!important;isolation:isolate;background:#f5f4f1!important;overflow:hidden!important;border-radius:15px!important}.market-app .rmai-home{aspect-ratio:1!important}.market-app .rmai-eats{height:auto!important;aspect-ratio:16/10!important}.market-app .rmai-detail{aspect-ratio:1!important}
+ .market-app img.rmai-image{width:100%!important;height:100%!important;display:block!important;object-fit:cover!important;transform:none!important}.market-app .rmai-media:not(.rmai-ready) img.rmai-image{visibility:hidden!important}
+ .rmai-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:22px;text-align:center;background:radial-gradient(ellipse at 50% 40%,#fff,#eeeae5);z-index:1;color:#6d6964;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}.rmai-empty>span{font-size:10px;line-height:1.5}.rmai-empty>button{border:1px solid #ddd8d0;border-radius:24px;padding:10px 17px;background:#ffffffd9;color:#47413a;font:12px -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;cursor:pointer}.rmai-ready .rmai-empty{display:none!important}
+ .rmai-corner{position:absolute;bottom:8px;left:8px;z-index:8;padding:5px 8px;border:0;border-radius:20px;background:#fffffff0;color:#6f6961;font:10px -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;cursor:pointer;backdrop-filter:blur(8px)}
+ .rmai-toolbar{position:fixed;right:14px;bottom:calc(86px + env(safe-area-inset-bottom));z-index:70;border:1px solid #e5dfd6!important;border-radius:24px!important;padding:10px 14px!important;background:#fffdf9f5!important;color:#4c463d!important;font:12px -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif!important;box-shadow:0 3px 20px #50402a0b;cursor:pointer}
+ .rmai-shade{position:fixed;inset:0;z-index:2147483000;background:#0005;display:flex;align-items:flex-end;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;color:#2c2925}.rmai-sheet{box-sizing:border-box;width:100%;max-width:540px;max-height:88dvh;overflow:auto;border-radius:24px 24px 0 0;background:#fffdf9;padding:22px 20px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -10px 60px #0002}.rmai-sheet h2{font-size:18px;line-height:1.5;font-weight:600;margin:0 36px 12px 0}.rmai-sheet p{font-size:13px;line-height:1.65;color:#7a746b;white-space:pre-line}
+ .rmai-sheet button,.rmai-sheet select,.rmai-sheet textarea{font-family:inherit;font-size:13px}.rmai-action{display:block;width:100%;margin:12px 0;padding:12px 15px;border:1px solid #e4ddd3;border-radius:13px;background:#f6f2eb;color:#4a4339;cursor:pointer}.rmai-action:disabled{opacity:.45}.rmai-primary{background:#50493e;border-color:#50493e;color:white}.rmai-close{float:right;border:0;border-radius:50%;width:30px;height:30px;background:#f0ece5;color:#786f63;cursor:pointer}.rmai-sheet select{width:100%;border:1px solid #e4ddd3;border-radius:12px;padding:11px;background:white;color:#514a40}.rmai-sheet textarea{box-sizing:border-box;width:100%;min-height:150px;border:1px solid #e4ddd3;border-radius:12px;padding:12px;background:white;color:#514a40;line-height:1.5;resize:vertical}.rmai-sheet img{display:block;max-width:100%;width:260px;margin:12px auto;border-radius:15px}.rmai-row{border-top:1px solid #eee8df;padding-top:10px;margin-top:10px}
+ `;document.head.append(css);
+ function note(r,s){r.note.textContent=s;}
+ async function paint(r){if(stopped||!r.img.isConnected)return;const j=jobs.get(r.key),queued=pending.has(r.key);r.action.disabled=queued||j?.status==='running';r.action.textContent=queued?'已加入队列':j?.status==='running'?'系统正在生图…':['failed','unknown'].includes(j?.status)?'查看任务':'生成商品图';note(r,queued?'等待系统生图':j?.status==='running'?'生图由系统处理，请等待':j?.status==='unknown'?'上次结果未确认，不会自动重试':j?.status==='failed'?'上次未完成，点按查看':'系统 AI 生图 · 可能单独计费');if(j?.hasImage){const src=await imageUrl(r.key);if(stopped||!r.img.isConnected||!src)return;r.img.onload=()=>{if(!stopped)r.wrap.classList.add('rmai-ready');};r.img.onerror=()=>{r.wrap.classList.remove('rmai-ready');note(r,'缓存图片暂时加载失败，不会重新生图。');};if(r.img.getAttribute('src')!==src)r.img.src=src;if(r.img.complete&&r.img.naturalWidth)r.wrap.classList.add('rmai-ready');}}
+ function paintKey(key){for(const r of records)if(r.key===key)paint(r).catch(()=>note(r,'缓存读取失败，请检查浏览器空间。'));}
+ function tool(){if(stopped)return;const root=document.querySelector('.market-app');if(toolbar&&!toolbar.isConnected)toolbar=null;if(!root){toolbar?.remove();toolbar=null;return;}if(!toolbar){toolbar=button('商品 AI 配图',settings,'rmai-toolbar');root.append(toolbar);}toolbar.textContent=working?'系统正在生图…':pending.size?'生图队列 '+pending.size:'商品 AI 配图';}
+ function enqueue(rec,custom='',manual=true,force=false){if(!ready||stopped||pending.has(rec.key)||jobs.get(rec.key)?.status==='running')return;if(typeof api?.ai?.generateImage!=='function'){panelMessage='此版本 Roche 尚未提供系统生图接口，请先更新 Roche。';settings();return;}if(!manual&&(!rec.isNew||autoCount>=pref.autoLimit||jobs.has(rec.key)))return;pending.set(rec.key,{rec,custom,manual,force,retryUnknown:jobs.get(rec.key)?.status==='unknown'});if(!manual)autoCount++;paintKey(rec.key);tool();pump();}
+ async function generate(task){
+  const job=await claim(task),{rec}=task;if(!job){paintKey(rec.key);return;}paintKey(rec.key);
+  try{const prompt=normal(task.custom)?String(task.custom).slice(0,6000):await promptFor(rec);if(stopped){job.status='unknown';job.error='任务在发起前停止，尚未调用生图。';await putJob(job);return;}
+   currentTitle=rec.title;
+   const raw=await api.ai.generateImage({prompt,config:{resolution:'square',defaultPositivePrompt:'',defaultNegativePrompt:'',oaiDefaultPositivePrompt:'',oaiDefaultNegativePrompt:''}});
+   const asset=await compress(raw),success={...job,status:'done',hasImage:true,finished:Date.now(),error:''};await saveImage(success,{key:rec.key,...asset,createdAt:Date.now()});const old=images.get(rec.key);if(old?.object)URL.revokeObjectURL(old.url);images.delete(rec.key);
+  }catch(error){job.status='failed';job.error=String(error?.message||'系统生图未完成').replace(/(?:Bearer\s+|sk-)[A-Za-z0-9_.-]+/gi,'[已隐藏]').slice(0,600);job.finished=Date.now();await putJob(job).catch(()=>{});}finally{currentTitle='';if(!stopped)paintKey(rec.key);}
+ }
+ async function pump(){if(working||stopped||!ready)return;working=true;tool();try{while(pending.size&&!stopped){const [key,task]=pending.entries().next().value;pending.delete(key);try{if(navigator.locks?.request)await navigator.locks.request('roche-market-ai-native-generation',{mode:'exclusive'},()=>stopped?undefined:generate(task));else await generate(task);}catch(error){panelMessage=String(error?.message||'任务未能保存，未发起生图。');paintKey(key);}}}finally{working=false;tool();}}
+ const near=new IntersectionObserver(entries=>{for(const e of entries)if(e.isIntersecting){const r=byImg.get(e.target);if(r){paint(r).catch(()=>{});if(pref.mode==='new'&&r.isNew&&!jobs.has(r.key))enqueue(r,'',false);}}},{rootMargin:'120px 0px'});
+ function discover(){scheduled=false;if(stopped)return;tool();for(const r of records)if(!r.img.isConnected){near.unobserve(r.img);records.delete(r);}for(const [key,a]of images)if(![...records].some(r=>r.key===key)){if(a.object)URL.revokeObjectURL(a.url);images.delete(key);}const root=document.querySelector('.market-app');if(!root)return;
+  for(const img of root.querySelectorAll('img')){const existing=byImg.get(img),src=img.getAttribute('src')||'';if(existing){if(placeholder(src)&&src!==existing.original){near.unobserve(img);records.delete(existing);byImg.delete(img);img.onload=img.onerror=null;existing.empty.remove();existing.corner.remove();existing.wrap.classList.remove('rmai-ready','rmai-home','rmai-eats','rmai-detail');}else{if(src===existing.original&&jobs.get(existing.key)?.hasImage)paint(existing).catch(()=>{});continue;}}if(!placeholder(src)||img.classList.contains('object-contain'))continue;const wrap=img.parentElement;let card=wrap,heading;for(let i=0;i<4&&card&&card!==root;i++,card=card.parentElement){heading=card.querySelector('h3,h1');if(heading)break;}if(!heading)continue;const title=normal(heading.textContent);if(!title)continue;
+   const r={img,wrap,card,title,key:title,description:normal(card.querySelector('p')?.textContent),original:src,alt:img.getAttribute('alt'),isNew:ready&&!known.has(title)};known.add(title);preferences();r.note=node('span','');r.action=button('生成商品图',()=>{const j=jobs.get(r.key);['failed','unknown'].includes(j?.status)?itemPanel(r):enqueue(r);});r.empty=node('div','rmai-empty');r.empty.append(r.action,r.note);r.corner=button('AI 商品图 · 设置',()=>itemPanel(r),'rmai-corner');wrap.classList.add('rmai-media',heading.tagName==='H1'?'rmai-detail':wrap.classList.contains('h-40')?'rmai-eats':'rmai-home');img.classList.add('rmai-image');img.alt=title+'（AI 生成示意图）';wrap.append(r.empty,r.corner);records.add(r);byImg.set(img,r);if(ready){paint(r).catch(()=>{});near.observe(img);}else note(r,'正在载入本机图片缓存…');
   }
-  function photoUrl(item) {
-    const url = safeUrl(item.url);
-    // Flickr supplies a documented 640px size suffix; avoid decoding multi-megapixel originals.
-    if (/^https:\/\/live\.staticflickr\.com\//.test(url) && /_[a-z]\.jpe?g$/i.test(url)) return url.replace(/_[a-z](\.jpe?g)$/i, '_z$1');
-    const commons=url.match(/^(https:\/\/upload\.wikimedia\.org\/wikipedia\/commons\/)([a-f0-9]\/[^/]+\/)([^/]+\.(?:jpg|jpeg|png|webp))$/i);
-    if (commons) return commons[1]+'thumb/'+commons[2]+commons[3]+'/640px-'+commons[3];
-    return safeUrl(item.thumbnail);
-  }
-  function rank(item, query) {
-    const title = normalize(item.title).toLowerCase();
-    const text = title + ' ' + (item.tags || []).map(t => t.name).join(' ').toLowerCase();
-    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-    let score = tokens.reduce((s,t) => s + (title.includes(t) ? 5 : text.includes(t) ? 1 : -3), 0);
-    if (title.replace(/[^a-z0-9]/g,'') === query.toLowerCase().replace(/[^a-z0-9]/g,'')) score += 2;
-    if (/\b(stand|stall|shop|store|sign|advert|logo|poster|menu|museum|exhibition|people|driver|circuit|schematic|diagram|cap|lid|bottom|inside|internal|ginger)\b/.test(title) && !/\b(stand|poster|museum)\b/.test(query)) score -= 18;
-    if (item.width && item.height) score -= Math.abs(Math.log(item.width / item.height));
-    if (/bottle/.test(query) && item.height > item.width * 1.2) score += 9;
-    if (/bottle/.test(query) && item.width > item.height * 1.1) score -= 6;
-    return score;
-  }
-  async function search(query, source='wikimedia', useStarter=true) {
-    if (!query) return [];
-    const cacheKey=source+'|'+query;
-    const cached = state.queries[cacheKey];
-    if (cached && Date.now() - cached.time < (cached.results.length ? 30 * 864e5 : 864e5)) return cached.results;
-    if (useStarter && starter[query]) return starter[query];
-    if (pendingQueries.has(cacheKey)) return pendingQueries.get(cacheKey);
-    const task = searchTail.catch(() => {}).then(async () => {
-      if (Date.now() < nextAt) await wait(nextAt - Date.now());
-      if (stopped || !state.enabled) return [];
-      const day = new Date().toLocaleDateString('en-CA');
-      if (state.day !== day) { state.day = day; state.requests = 0; }
-      if ((state.requests || 0) >= 150) throw Error('今天已达到插件的搜图上限，明天继续；已有配图照常显示。');
-      state.requests = (state.requests || 0) + 1; nextAt = Date.now() + 3500; save();
-      const controller = new AbortController(); requests.add(controller);
-      const timeout = setTimeout(() => controller.abort(), 18000);
-      try {
-        const u = new URL(HOST); u.search = new URLSearchParams({q:query,page_size:'12',mature:'false',format:'json'});
-        if(source)u.searchParams.set('source',source);
-        const response = await fetch(u.href, {signal:controller.signal,credentials:'omit',referrerPolicy:'no-referrer',headers:{Accept:'application/json'}});
-        if (response.status === 429) { nextAt = Date.now() + Math.max(60000, Math.min(3600000, Number(response.headers.get('Retry-After')) * 1000 || 60000)); throw Error('搜图服务暂时限流，稍后会继续；不会改用收费 API。'); }
-        if (!response.ok) throw Error('搜图服务暂不可用（' + response.status + '）');
-        const json = await response.json();
-        const results = (json.results || []).filter(x => !x.mature && !(x.unstable__sensitivity || []).length && (!x.filesize || x.filesize<6000000) && (!x.width || !x.height || x.width*x.height<8000000) && !/\.(svg|png|gif|pdf)(?:\?|$)/i.test(x.url||'') && photoUrl(x) && x.license_url && x.foreign_landing_url && rank(x,query)>=2)
-          .map(x => ({url:photoUrl(x),fallback:safeUrl(x.url),title:String(x.title || ''),creator:String(x.creator || ''),source:safeUrl(x.foreign_landing_url),license:String(x.license || ''),licenseUrl:safeUrl(x.license_url),score:rank(x,query)}))
-          .sort((a,b) => b.score - a.score).slice(0, 8);
-        state.queries[cacheKey] = {time:Date.now(),results}; save(); return results;
-      } catch (error) {
-        if (error.name === 'AbortError') throw Error('图片搜索超时；可稍后在配图面板里重试。');
-        if (error instanceof TypeError) throw Error('连接不到图片搜索服务，请检查网络后重试。');
-        throw error;
-      } finally { clearTimeout(timeout); requests.delete(controller); }
-    }).finally(() => pendingQueries.delete(cacheKey));
-    searchTail = task.catch(() => {});
-    pendingQueries.set(cacheKey,task); return task;
-  }
-  function placeholder(src) {
-    if (!src.startsWith('data:image/svg+xml')) return false;
-    try {
-      const svg = src.includes(';base64,') ? atob(src.split(',')[1]) : decodeURIComponent(src.slice(src.indexOf(',') + 1));
-      return svg.includes('MARKET #') || (svg.includes('#f1f5f9') && svg.includes('<path') && svg.includes('<text'));
-    } catch { return false; }
-  }
-  const style = el('style'); style.id = 'rmp-styles';
-  style.textContent = `
-  .market-app .rmp-media{position:relative!important;isolation:isolate;background:#f3f4f5!important;overflow:hidden!important;border-radius:14px!important}
-  .market-app .rmp-media.rmp-home{aspect-ratio:1!important}
-  .market-app .rmp-media.rmp-eats{height:auto!important;aspect-ratio:16/10!important}
-  .market-app .rmp-media.rmp-detail{aspect-ratio:1!important}
-  .market-app .rmp-media img.rmp-photo{display:block!important;width:100%!important;height:100%!important;object-fit:cover!important;transform:none!important}
-  .market-app .rmp-media.rmp-product img.rmp-photo{object-fit:contain!important;padding:8px!important;background:#fff!important;box-sizing:border-box!important}
-  .market-app .rmp-media:not(.rmp-ready) img.rmp-photo{visibility:hidden!important}
-  .market-app .rmp-media.rmp-ready:after{display:none}
-  .market-app .rmp-media:not(.rmp-ready):after{content:attr(data-rmp-status);position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;color:#8b9098;font:12px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;pointer-events:none;background:linear-gradient(140deg,#f5f5f7,#e9ecef);z-index:0}
-  .rmp-credit{position:absolute!important;bottom:8px!important;left:8px!important;z-index:8!important;max-width:calc(100% - 18px);padding:4px 7px!important;border:0!important;border-radius:20px!important;background:rgba(255,255,255,.88)!important;color:#51545a!important;font:10px/1.2 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif!important;cursor:pointer;backdrop-filter:blur(8px)}
-  .rmp-toolbar{position:fixed;right:14px;bottom:calc(86px + env(safe-area-inset-bottom));z-index:70;border:1px solid #e5e7eb!important;border-radius:22px!important;padding:9px 13px!important;background:#fffef5ee!important;color:#30343a!important;font:12px -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif!important;box-shadow:0 3px 16px #0000000d}
-  .rmp-shade{position:fixed;inset:0;z-index:2147483000;background:#0005;display:flex;align-items:flex-end;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;color:#26282b}
-  .rmp-sheet{box-sizing:border-box;background:#fff;border-radius:24px 24px 0 0;padding:22px 20px calc(24px + env(safe-area-inset-bottom));width:100%;max-width:540px;max-height:85dvh;overflow:auto;box-shadow:0 -10px 60px #0002}
-  .rmp-sheet h2{font-size:18px;margin:0 38px 10px 0;font-weight:600}.rmp-sheet p{font-size:13px;line-height:1.65;color:#6b7280;margin:10px 0}
-  .rmp-row{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:12px 0}.rmp-sheet button{font-family:inherit;font-size:13px;cursor:pointer}
-  .rmp-action{background:#f2f3f5;border:0;border-radius:12px;padding:11px 13px;color:#34363a;margin:8px 0}.rmp-sheet input{box-sizing:border-box;width:100%;background:#f5f6f8;border:1px solid #e5e7eb;border-radius:12px;padding:12px;font-family:inherit;font-size:14px;color:#202124}
-  .rmp-results{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin:14px 0}.rmp-option{padding:0;border:0;background:#f4f5f6;border-radius:12px;overflow:hidden}.rmp-option img{width:100%;aspect-ratio:1;object-fit:cover;display:block}.rmp-option span{display:block;padding:7px;font-size:10px;line-height:1.4}
-  .rmp-sheet a{color:#47566b;text-decoration:underline}.rmp-close{float:right;background:#f2f3f5;border:0;border-radius:50%;width:30px;height:30px;color:#555}
-  `;
-  document.head.append(style);
-  function syncButton() {
-    if(stopped){panel?.remove();panel=null;return;}
-    const root = document.querySelector('.market-app');
-    if (!root) { panel?.remove(); panel = null; return; }
-    if (!panel) { panel = button('自动配图', () => openSettings(), 'rmp-toolbar'); root.append(panel); }
-    panel.textContent = !state.enabled ? '配图已暂停' : busy ? '正在配图…' : '自动配图';
-  }
-  function setNote(rec, text) { if (rec.wrap.dataset.rmpStatus !== text) rec.wrap.dataset.rmpStatus = text; }
-  function clearPhoto(rec) {
-    rec.token = (rec.token || 0) + 1;
-    rec.img.onload = rec.img.onerror = null;
-    rec.wrap.classList.remove('rmp-ready');
-    if (rec.img.getAttribute('src') !== rec.original) rec.img.setAttribute('src',rec.original);
-  }
-  function applyPhoto(rec, item) {
-    if (stopped || !rec.img.isConnected) return;
-    if(rec.failedUrl===item.url){setNote(rec,'图片暂时加载失败\n点“配图”更换');return;}
-    const token = rec.token = (rec.token || 0) + 1;
-    rec.img.onload = () => { if (!stopped && token === rec.token) {
-      rec.wrap.classList.add('rmp-ready'); rec.credit.textContent = '示意图 · 配图';
-      if(item.fallback && rec.img.getAttribute('src')===item.fallback && item.url!==item.fallback){item.url=item.fallback;save();}
-    } };
-    rec.img.onerror = () => {
-      if (stopped || token !== rec.token) return;
-      if (item.fallback && rec.img.getAttribute('src') !== item.fallback) { rec.img.src = item.fallback; return; }
-      rec.failedUrl=item.url;clearPhoto(rec); setNote(rec,'图片暂时加载失败\n点“配图”更换'); rec.credit.textContent = '配图';
-    };
-    rec.img.referrerPolicy = 'no-referrer'; rec.img.decoding = 'async'; rec.img.loading = 'lazy';
-    if (rec.img.getAttribute('src') !== item.url) rec.img.src = item.url;
-    if (rec.img.complete && rec.img.naturalWidth) rec.img.onload();
-  }
-  function update(rec) {
-    if (!rec.img.isConnected) return;
-    const item = state.items[rec.key];
-    if (item?.disabled) { clearPhoto(rec); setNote(rec,'已关闭这件商品的配图'); return; }
-    if (item?.url) { applyPhoto(rec,item); return; }
-    if (!state.enabled) { clearPhoto(rec); setNote(rec,'自动配图已暂停'); return; }
-    if (item?.failed && Date.now() - item.time < 864e5) { setNote(rec,item.message || '暂未找到合适图片\n点“配图”重试'); return; }
-    setNote(rec,'等待配图'); near.observe(rec.img);
-  }
-  function updateTitle(key) { for (const rec of records) if (rec.key === key) update(rec); }
-  function discover() {
-    scheduled = false; if (stopped) return;
-    for (const rec of records) if (!rec.img.isConnected) { near.unobserve(rec.img); records.delete(rec); }
-    syncButton();
-    const root = document.querySelector('.market-app'); if (!root) return;
-    for (const img of root.querySelectorAll('img')) {
-      const src = img.getAttribute('src') || '';
-      const existing = byImage.get(img);
-      if (existing) {
-        const saved=state.items[existing.key];
-        if (!placeholder(src) && src!==saved?.url && src!==saved?.fallback) {
-          near.unobserve(img);records.delete(existing);existing.token++;img.onload=img.onerror=null;
-          existing.credit.remove();img.classList.remove('rmp-photo');existing.wrap.classList.remove('rmp-media','rmp-home','rmp-eats','rmp-detail','rmp-ready');byImage.delete(img);continue;
-        }
-        if (placeholder(src) && src !== existing.original) { near.unobserve(img); records.delete(existing); existing.credit.remove(); byImage.delete(img); }
-        else { if (src === existing.original && state.items[existing.key]?.url) update(existing); continue; }
-      }
-      if (!placeholder(src) || img.classList.contains('object-contain')) continue;
-      const wrap = img.parentElement;
-      let card = wrap, heading;
-      for (let i=0; i<4 && card && card!==root; i++,card=card.parentElement) {
-        heading = card.querySelector('h3,h1'); if (heading) break;
-      }
-      if (!heading) continue;
-      const title = normalize(heading.textContent); if (!title) continue;
-      const rec = {img,wrap,card,title,key:title,original:src,originalAlt:img.getAttribute('alt'),token:0};
-      rec.credit = button('配图', () => openItem(rec), 'rmp-credit');
-      wrap.classList.add('rmp-media', heading.tagName==='H1' ? 'rmp-detail' : wrap.classList.contains('h-40') ? 'rmp-eats' : 'rmp-home');
-      if(!/ice cream|dessert|sticky rice|cake|pizza|hamburger|sushi|ramen|steak|pasta|salad|chicken|hot pot|dumpling|coffee|tea|chocolate|sandwich|barbecue|wine|champagne/i.test(queriesFor(title)[0]))wrap.classList.add('rmp-product');
-      img.classList.add('rmp-photo'); img.alt = title + '（商品示意图）';
-      wrap.append(rec.credit); byImage.set(img,rec); records.add(rec); update(rec);
-    }
-  }
-  function schedule() { if (!stopped && !scheduled) { scheduled = true; requestAnimationFrame(discover); } }
-  const near = new IntersectionObserver(entries => {
-    for (const entry of entries) if (entry.isIntersecting) {
-      const rec = byImage.get(entry.target); near.unobserve(entry.target);
-      if (rec) { queue.set(rec.key,rec); pump(); }
-    }
-  },{rootMargin:'200px 0px'});
-  async function pump() {
-    if (busy || stopped || !state.enabled) return;
-    busy = true; syncButton();
-    try {
-      while (queue.size && !stopped && state.enabled) {
-        const [key,rec] = queue.entries().next().value; queue.delete(key);
-        if (!rec.img.isConnected || state.items[key]?.url || state.items[key]?.disabled) continue;
-        setNote(rec,'正在寻找相近图片…');
-        try {
-          let found = [];
-          for (const q of queriesFor(rec.title)) { found = await search(q); if (found.length) break; }
-          if(!found.length)found=await search(queriesFor(rec.title)[0],'');
-          if (stopped) break;
-          if (state.items[key]?.url || state.items[key]?.disabled) continue; // A manual choice wins over an older request.
-          state.items[key] = found.length ? {...found[0],time:Date.now()} : {failed:true,time:Date.now(),message:'暂未找到相近图片\n点“配图”换个搜索词'};
-        } catch (error) {
-          if (stopped || !state.enabled) break;
-          if (!state.items[key]?.url && !state.items[key]?.disabled) state.items[key] = {failed:true,time:Date.now(),message:error.message};
-        }
-        save(); updateTitle(key);
-      }
-    } finally { busy = false; syncButton(); }
-  }
-  function sheet(title) {
-    modal?.remove(); modal = el('div','rmp-shade');
-    const box = el('section','rmp-sheet'); box.setAttribute('role','dialog'); box.setAttribute('aria-modal','true'); box.setAttribute('aria-label',title);
-    box.append(button('×',() => { modal?.remove(); modal=null; },'rmp-close'),el('h2','',title));
-    modal.append(box); modal.addEventListener('click', e => { if (e.target===modal) { modal.remove(); modal=null; } });
-    document.body.append(modal); return box;
-  }
-  function openSettings() {
-    const box = sheet('商城自动配图 · 试用版');
-    box.append(el('p','','根据商品名称自动搜索公开图片，不调用你的聊天或翻译模型 API。搜索词会发送至 Openverse；AI 虚构商品使用相近示意图。'));
-    box.append(button(state.enabled?'暂停自动搜图':'开启自动搜图',() => {
-      state.enabled=!state.enabled;save(); if(!state.enabled) { queue.clear();for(const c of requests)c.abort(); }
-      else { for(const rec of records)update(rec);pump(); }
-      openSettings();syncButton();
-    },'rmp-action'));
-    box.append(el('p','','已保存 '+Object.values(state.items).filter(x=>x.url).length+' 件商品的配图。只保存直链和来源，不把大图写进主题。'));
-    box.append(button('重试当前页面配图失败的商品',() => {
-      for(const rec of records)if(state.items[rec.key]?.failed||rec.failedUrl){rec.failedUrl='';if(state.items[rec.key]?.failed)delete state.items[rec.key];update(rec);}
-      save();modal?.remove();modal=null;
-    },'rmp-action'));
-    box.append(el('p','','点商品图片左下角“配图”，可以查看来源、换图或重新搜索。商品生成仍使用 Roche 原来的 API 设置。'));
-  }
-  function openItem(rec) {
-    const box = sheet(rec.title),current = state.items[rec.key];
-    box.append(el('p','','图片仅供外观示意。可以直接用自动配图，也可以在这里选择另一张。'));
-    if(current?.url) {
-      const line=el('p'); line.append(document.createTextNode((current.title||'自定义图片')+(current.creator?' · '+current.creator:'')+' '));
-      for(const [label,url]of [['图片来源',current.source],[current.license?.toUpperCase(),current.licenseUrl]])if(label&&safeUrl(url)){const a=el('a','',label);a.href=url;a.target='_blank';a.rel='noopener noreferrer';line.append(a,document.createTextNode(' '));}
-      box.append(line);
-    }
-    const input=el('input');input.value=queriesFor(rec.title)[0];input.placeholder='换个搜索词';input.setAttribute('aria-label','图片搜索词');box.append(input);
-    const result=el('div'),notice=el('p','','搜图服务有免费使用额度；失败不会改用付费模型。');
-    const run=async()=>{
-      const q=normalize(input.value).slice(0,90);if(!q)return;
-      if(!state.enabled){notice.textContent='请先在自动配图面板开启搜图。';return;}
-      result.replaceChildren();notice.textContent='正在搜索…';
-      try{
-        // User search shares the same global queue pacing; cached requests are free to reuse.
-        const items=await search(q,'wikimedia',false);if(!box.isConnected)return;
-        result.className='rmp-results';
-        for(const item of items){const pick=button('',()=>{state.items[rec.key]={...item,time:Date.now()};save();updateTitle(rec.key);modal?.remove();modal=null;},'rmp-option');const image=el('img');image.src=item.url;image.loading='lazy';image.referrerPolicy='no-referrer';image.alt=item.title;pick.append(image,el('span','',item.title||'选择这张'));result.append(pick);}
-        notice.textContent=items.length?'点图片即可更换，并固定保存。':'没有找到图片，可以换个更简单的品类词。';
-      }catch(error){notice.textContent=error.message;}
-    };
-    box.append(button('搜索图片',run,'rmp-action'),notice,result);
-    input.addEventListener('keydown',e=>{if(e.key==='Enter')run();});
-    box.append(button(current?.disabled?'恢复自动配图':'这件商品不配图',()=>{
-      if(current?.disabled)delete state.items[rec.key];else state.items[rec.key]={disabled:true,time:Date.now()};
-      save();updateTitle(rec.key);modal?.remove();modal=null;
-    },'rmp-action'));
-  }
-  const observer = new MutationObserver(mutations => {
-    if (mutations.some(m => m.type==='attributes' || [...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1 && !(n.classList?.contains('rmp-credit') || n.classList?.contains('rmp-toolbar') || n.closest?.('.rmp-shade'))))) schedule();
-  });
-  observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
-  const api = window.RocheMarketPhotos = {version:VERSION,destroy(){
-    stopped=true;observer.disconnect();near.disconnect();queue.clear();for(const c of requests)c.abort();
-    panel?.remove();modal?.remove();style.remove();
-    for(const rec of records){rec.img.onload=rec.img.onerror=null;rec.img.src=rec.original;rec.img.classList.remove('rmp-photo');if(rec.originalAlt===null)rec.img.removeAttribute('alt');else rec.img.alt=rec.originalAlt;rec.wrap.classList.remove('rmp-media','rmp-home','rmp-eats','rmp-detail','rmp-ready','rmp-product');delete rec.wrap.dataset.rmpStatus;rec.credit.remove();}
-    records.clear();
-  }};
-  try { window.RochePlugin?.register({id:'roche-market-photos',name:'商城自动配图 · 试用版',version:VERSION}); } catch(error) { console.warn('[Roche Market Photos] register',error); }
-  discover();
+ }
+ function schedule(){if(!scheduled&&!stopped){scheduled=true;requestAnimationFrame(discover);}}
+ function close(){modal?.remove();modal=null;}
+ function sheet(title){close();modal=node('div','rmai-shade');const box=node('section','rmai-sheet');box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label',title);box.append(button('×',close,'rmai-close'),node('h2','',title));modal.append(box);modal.addEventListener('click',e=>{if(e.target===modal)close();});document.body.append(modal);return box;}
+ function settings(){const box=sheet('商城 AI 商品图');box.append(node('p','','使用 Roche 系统当前生图配置。每件商品发起一个独立生图任务，可能按你配置的生图服务计费。图片保存后直接复用，刷新不会重新生图。'));if(panelMessage)box.append(node('p','',panelMessage));if(currentTitle)box.append(node('p','','系统正在生成：'+currentTitle+'。不会因为等待时间长而重新发起请求。'));
+  const mode=node('select');mode.setAttribute('aria-label','商品图片生成方式');for(const [value,text]of [['manual','手动 · 点一件生成一张'],['new','自动 · 仅新商品靠近屏幕时生成']]){const o=node('option','',text);o.value=value;mode.append(o);}mode.value=pref.mode;mode.addEventListener('change',async()=>{mode.disabled=true;try{if(mode.value==='new'){for(const p of await productRows())known.add(normal(p.title));for(const r of records){known.add(r.key);r.isNew=false;}}pref.mode=mode.value;preferences();if(pref.mode==='manual'){for(const [key,t]of pending)if(!t.manual){pending.delete(key);paintKey(key);}}settings();}finally{mode.disabled=false;}});box.append(node('p','','生成方式'),mode);
+  const limit=node('select');limit.setAttribute('aria-label','每次打开自动生图上限');for(const n of [2,4,8,12]){const o=node('option','','每次打开最多自动生成 '+n+' 张');o.value=String(n);limit.append(o);}limit.value=String(pref.autoLimit);limit.addEventListener('change',()=>{pref.autoLimit=Number(limit.value);preferences();});box.append(node('p','','自动模式的数量上限'),limit,node('p','','已保存 '+[...jobs.values()].filter(j=>j.hasImage).length+' 件商品图片。本次已安排 '+autoCount+' 张自动生图。旧商品由你点选生成，失败和中断不自动重试。'));
+  if(api?.ui?.openApp)box.append(button('打开 Roche 系统设置',()=>{close();api.ui.openApp('settings');},'rmai-action'));
+  for(const j of [...jobs.values()].filter(j=>['failed','unknown'].includes(j.status)).slice(-6)){const row=node('div','rmai-row');row.append(node('p','',j.title+'\n'+(j.error||'上次结果未确认，请先在生图后台查看。')));box.append(row);}
+ }
+ async function itemPanel(r){const box=sheet(r.title),j=jobs.get(r.key);if(j?.hasImage){try{const src=await imageUrl(r.key);if(src&&box.isConnected){const im=node('img');im.src=src;im.alt=r.title;box.append(im);}}catch{}}box.append(node('p','','由 Roche 系统 AI 生成商品示意图。提示词只包含商品资料，不额外调用聊天模型。'));if(j?.error)box.append(node('p','',j.error));if(j?.status==='unknown')box.append(node('p','','上次任务可能已经产生费用，但本机没有确认结果。请先查看生图后台，再决定是否重新生成。'));const input=node('textarea');input.setAttribute('aria-label','商品图片提示词');input.placeholder='正在整理商品资料…';box.append(input);promptFor(r).then(p=>{if(box.isConnected&&!input.value)input.value=p;});const act=button(j?.hasImage?'重新生成一张 · 可能计费':'生成这一件 · 可能计费',()=>{enqueue(r,input.value,true,!!j?.hasImage);close();},'rmai-action rmai-primary');act.disabled=j?.status==='running';box.append(act);}
+ const observer=new MutationObserver(ms=>{if(ms.some(m=>m.type==='attributes'||[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-shade')&&!n.classList?.contains('rmai-toolbar')&&!n.classList?.contains('rmai-empty')&&!n.classList?.contains('rmai-corner'))))schedule();});observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
+ window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;observer.disconnect();near.disconnect();pending.clear();toolbar?.remove();close();css.remove();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');if(r.alt===null)r.img.removeAttribute('alt');else r.img.alt=r.alt;r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready');r.empty.remove();r.corner.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();}};
+ try{window.RochePlugin?.register({id:ID,name:'商城 AI 商品图 · 系统生图',version:VERSION});}catch{}
+ discover();
+ (async()=>{try{db=await database();if(stopped){db.close();return;}for(const j of await read('jobs')){jobs.set(j.key,j.status==='running'&&j.owner!==owner?{...j,status:'unknown',error:'页面曾在生图时关闭或刷新。上次任务结果未确认，不会自动重新调用。'}:j);}for(const p of await productRows())known.add(normal(p.title));preferences();ready=true;for(const r of records){r.isNew=false;paint(r).catch(()=>{});near.observe(r.img);}schedule();}catch(error){panelMessage=String(error?.message||'图片缓存不可用');for(const r of records){note(r,panelMessage);r.action.disabled=true;}tool();}})();
 })();
