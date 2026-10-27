@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.6.1
+/* Roche 商城 AI 商品图 v1.7.0
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.6.1',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.7.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -84,8 +84,10 @@
  });}
  // Gift attachments use Roche's native image-message path (not a text URL).
  const giftStarted=Date.now(),giftSeen=new Set();
- let giftCore=null,giftTimer,giftBusy=false,giftStatus='正在连接礼物图片功能…',giftFailures=[];
+ let giftCore=null,giftTimer,giftBusy=false,giftStatus='正在连接礼物图片功能…',giftFailures=[],giftCurrent='';
  const giftCopy=value=>JSON.parse(JSON.stringify(value));
+ function giftWait(task,message,ms=12000){let timer;return Promise.race([task,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(message)),ms);})]).finally(()=>clearTimeout(timer));}
+ const giftRead=(store,key)=>giftWait(read(store,key),'读取礼物图片缓存超过 12 秒，请刷新后重试。');
  function giftNotice(text){giftStatus=text;refreshGiftControls();api?.ui?.toast?.(text);}
  function giftEnabled(){return pref.giftVision!==false;}
  function nativeGiftDB(store,key,change){return new Promise((resolve,reject)=>{
@@ -93,7 +95,7 @@
   const request=indexedDB.open('Roche_db');request.onupgradeneeded=()=>{request.transaction.abort();finish(Error('未找到 Roche 数据库。'));};request.onerror=request.onblocked=()=>finish(Error('订单图片存储不可用。'));
   request.onsuccess=()=>{d=request.result;if(done){d.close();return;}if(!d.objectStoreNames.contains(store))return finish(Error('系统订单存储结构已变化。'));const tx=d.transaction(store,change?'readwrite':'readonly'),s=tx.objectStore(store),q=s.get(key);let result;q.onsuccess=()=>{result=q.result;if(result&&change){try{result=change(result);s.put(result);}catch(error){tx.abort();finish(error);}}};tx.oncomplete=()=>finish(null,result);tx.onerror=tx.onabort=()=>finish(tx.error||Error('订单图片保存失败。'));};
  });}
- async function giftJournal(value){await new Promise((resolve,reject)=>{const tx=db.transaction('settings','readwrite');tx.objectStore('settings').put(value);tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(Error('礼物配图进度保存失败。'));});}
+ async function giftJournal(value){await new Promise((resolve,reject)=>{const tx=db.transaction('settings','readwrite'),timer=setTimeout(()=>{try{tx.abort();}catch{}reject(Error('礼物附图进度保存超过 12 秒，请刷新后重试。'));},12000);tx.objectStore('settings').put(value);tx.oncomplete=()=>{clearTimeout(timer);resolve();};tx.onerror=tx.onabort=()=>{clearTimeout(timer);reject(Error('礼物配图进度保存失败。'));};});}
  function giftProductKey(item){
   const title=normal(item.title),id=String(item.id??''),kind=item.type==='eats'?'eats':null,category=String(item.categoryId||item.category?.id||'');
   const matches=new Map();
@@ -104,10 +106,10 @@
   if(matches.size>1)return '';
   const sameTitle=catalog.filter(p=>p.title===title);return sameTitle.length<=1&&(!sameTitle.length||String(sameTitle[0].id)===id)&&jobs.get(title)?.hasImage?title:'';
  }
- async function giftAsset(item){const key=giftProductKey(item);if(!key)return null;const legacy=legacyKeys.get(key)||jobs.get(key)?.legacyKey||jobs.get(key)?.title||normal(item.title);return await read('images',key)||await read('images',legacy);}
+ async function giftAsset(item){const key=giftProductKey(item);if(!key)return null;const legacy=legacyKeys.get(key)||jobs.get(key)?.legacyKey||jobs.get(key)?.title||normal(item.title);return await giftRead('images',key)||await giftRead('images',legacy);}
  async function giftImageData(asset){
   let blob=asset.blob;const remote=safeImage(asset.hostedUrl||asset.url);
-  if(!blob){if(!remote)throw Error('这件商品的原图不可用。');const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);try{const response=await fetch(remote,{signal:ctrl.signal,credentials:'omit',referrerPolicy:'no-referrer',cache:'no-store'});if(!response.ok)throw Error('图片下载返回 HTTP '+response.status+'。原链接可能已过期或禁止下载。');blob=await response.blob();}catch(error){if(error instanceof TypeError||/load failed|failed to fetch/i.test(String(error.message)))throw Error('浏览器无法下载图片（网络或跨域限制）。能在商城显示，不代表可以读取并发送；可转存至系统 ImgBB 后补发。');throw error;}finally{clearTimeout(timer);}}
+  if(!blob){if(!remote.startsWith('https:'))throw Error('这件商品没有可用的图片直链。');return {content:remote,display:remote,remote:true};}
   if(!blob.size||blob.size>12*1024*1024)throw Error('商品图为空或超过 12 MB，无法作为聊天附件。');
   // Trust raster bytes, not an image host's sometimes incorrect Content-Type.
   const bytes=new Uint8Array(await blob.slice(0,32).arrayBuffer()),ascii=String.fromCharCode(...bytes);
@@ -119,6 +121,74 @@
    const scale=Math.min(1,512/Math.max(im.naturalWidth,im.naturalHeight));canvas.width=Math.max(1,Math.round(im.naturalWidth*scale));canvas.height=Math.max(1,Math.round(im.naturalHeight*scale));const ctx=canvas.getContext('2d');if(!ctx)throw Error('无法准备聊天商品图。');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(im,0,0,canvas.width,canvas.height);const small=await timedBlob(canvas,'image/jpeg',.82);if(!small)throw Error('商品图压缩失败。');return {content:await dataUrlFor(small),display:remote.startsWith('https:')?remote:''};
   }finally{im.onload=im.onerror=null;im.src='';canvas.width=canvas.height=1;URL.revokeObjectURL(object);}
  }
+ // Native gift photos can display HTTPS images, but native chat only includes
+ // data:image input. Add the matching native photo's URL to its existing user
+ // message at the HTTP boundary. No extra model request or image download.
+ let giftBridgeFetch=null,giftBridgePreviousFetch=null;
+ let giftVisionStatus='图片直链将在你下一次聊天时随请求发送。';
+ function giftLinks(){const links=[];if(!giftCore)return links;
+  for(const list of Object.values(giftCore.v.messages||{}))for(const m of list){
+   if(m.type!=='image'||!m.isMe||m.isRecalled||m.isVisionRecognized||!m.rmaiGift?.messageId)continue;
+   const url=safeImage(m.content);if(!url.startsWith('https:')||!m.text?.startsWith('[礼物商品图]'))continue;
+   links.push({id:String(m.id),text:normal(m.text),token:String(m.id).replace(/[^a-zA-Z0-9]/g,'').slice(-8),url});
+  }return links;
+ }
+ function giftMatches(text,links){text=normal(text);if(!text.includes('[图片]'))return [];
+  return links.filter(link=>link.token&&text.includes(link.text)&&text.includes('(系统标识: '+link.token+')'));
+ }
+ function giftBlocksText(content){return typeof content==='string'?content:Array.isArray(content)?content.filter(p=>p?.type==='text'||!p?.type&&typeof p?.text==='string').map(p=>p.text).join('\n'):'';}
+ function giftImageMime(url){let path='';try{path=new URL(url).pathname.toLowerCase();}catch{}return path.endsWith('.png')?'image/png':path.endsWith('.webp')?'image/webp':path.endsWith('.gif')?'image/gif':path.endsWith('.avif')?'image/avif':'image/jpeg';}
+ function giftAddURLImages(payload,url,links,depth=0){
+  if(!payload||typeof payload!=='object'||depth>2||!links.length)return {value:payload,count:0};
+  // Keep Roche's configured proxy envelope intact, including its headers.
+  if(typeof payload.url==='string'&&String(payload.method||'POST').toUpperCase()==='POST'&&payload.bodyEncoding!=='base64'&&payload.body){
+   let inner;try{inner=typeof payload.body==='string'?JSON.parse(payload.body):payload.body;}catch{return {value:payload,count:0};}
+   const next=giftAddURLImages(inner,payload.url,links,depth+1);
+   return next.count?{value:{...payload,body:typeof payload.body==='string'?JSON.stringify(next.value):next.value},count:next.count}:{value:payload,count:0};
+  }
+  let path;try{path=new URL(url).pathname;}catch{return {value:payload,count:0};}
+  let count=0;
+  if(/\/(?:chat\/completions|messages)\/?$/.test(path)&&Array.isArray(payload.messages)){
+   const claude=/\/messages\/?$/.test(path);
+   const messages=payload.messages.map(message=>{
+    if(message?.role!=='user')return message;
+    const matches=giftMatches(giftBlocksText(message.content),links);if(!matches.length)return message;
+    const content=typeof message.content==='string'?[{type:'text',text:message.content}]:[...message.content];
+    const existing=new Set(content.flatMap(p=>[typeof p?.image_url==='string'?p.image_url:p?.image_url?.url,p?.source?.type==='url'?p.source.url:'']).filter(Boolean));
+    for(const link of matches)if(!existing.has(link.url)){content.push(claude?{type:'image',source:{type:'url',url:link.url}}:{type:'image_url',image_url:{url:link.url,detail:'low'}});existing.add(link.url);count++;}
+    return content.length===message.content?.length&&Array.isArray(message.content)?message:{...message,content};
+   });
+   return count?{value:{...payload,messages},count}:{value:payload,count:0};
+  }
+  if(/\/(?:models\/[^/]+):(?:streamGenerateContent|generateContent)$/.test(path)&&Array.isArray(payload.contents)){
+   const contents=payload.contents.map(message=>{
+    if(message?.role!=='user'||!Array.isArray(message.parts))return message;
+    const matches=giftMatches(message.parts.map(p=>p?.text||'').join('\n'),links);if(!matches.length)return message;
+    const parts=[...message.parts],existing=new Set(parts.map(p=>p?.file_data?.file_uri||p?.fileData?.fileUri).filter(Boolean));
+    for(const link of matches)if(!existing.has(link.url)){parts.push({file_data:{mime_type:giftImageMime(link.url),file_uri:link.url}});existing.add(link.url);count++;}
+    return parts.length===message.parts.length?message:{...message,parts};
+   });
+   return count?{value:{...payload,contents},count}:{value:payload,count:0};
+  }
+  return {value:payload,count:0};
+ }
+ function giftVisionNote(text){giftVisionStatus=text;if(!stopped)refreshGiftControls();}
+ function installGiftBridge(){if(giftBridgeFetch||typeof window.fetch!=='function')return;
+  giftBridgePreviousFetch=window.fetch;
+  giftBridgeFetch=async function(input,init){
+   const body=init?.body,method=String(init?.method||'GET').toUpperCase();
+   if(stopped||!giftEnabled()||method!=='POST'||typeof body!=='string'||!body.includes('[礼物商品图]'))return giftBridgePreviousFetch.call(this,input,init);
+   let next;try{const payload=JSON.parse(body),url=typeof input==='string'?input:input?.url||String(input);next=giftAddURLImages(payload,url,giftLinks());}catch{return giftBridgePreviousFetch.call(this,input,init);}
+   if(!next.count)return giftBridgePreviousFetch.call(this,input,init);
+   giftVisionNote('本轮聊天请求已加入 '+next.count+' 张礼物图片，正在等待聊天接口响应…');
+   try{const response=await giftBridgePreviousFetch.call(this,input,{...init,body:JSON.stringify(next.value)});
+    giftVisionNote(response.ok?'聊天接口已接受包含 '+next.count+' 张礼物图片的请求。':'聊天接口返回 HTTP '+response.status+'；图片已随请求发送，请查看聊天错误。');return response;
+   }catch(error){giftVisionNote('包含礼物图片的聊天请求未收到响应，请查看聊天页的网络错误。');throw error;}
+  };
+  window.fetch=giftBridgeFetch;
+ }
+ function removeGiftBridge(){if(giftBridgeFetch&&window.fetch===giftBridgeFetch)window.fetch=giftBridgePreviousFetch;}
+
  function giftLive(chat,id){return giftCore.v.messages?.[chat]?.find(m=>m.id===id);}
  async function attachGift(message,retry=false){
   if(!navigator.locks?.request){giftNotice('此浏览器缺少礼物附图锁，已暂停自动发送以避免重复。');return;}
@@ -126,7 +196,7 @@
  }
  async function attachGiftLocked(message,retry=false){
   const chat=message.conversationId,key='gift:'+chat+':'+message.id;
-  let journal=await read('settings',key);
+  let journal=await giftRead('settings',key);
   if(journal&&!retry)return;
   if(stopped||!giftEnabled()||message.isRecalled||!message.isMe||message.type!=='checkout_gift')return;
   const live=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);
@@ -137,22 +207,22 @@
   for(let index=0;index<items.length;index++){
    if(stopped||!giftEnabled())break;
    const item=items[index];if(item.type==='ticket'||journal.done.includes(index))continue;
-   giftStatus='正在准备礼物图片 '+(index+1)+' / '+items.length+'：'+normal(item.title);refreshGiftControls();
+   giftStatus='正在附上礼物图片 '+(index+1)+' / '+items.length+'：'+normal(item.title);giftCurrent=key;refreshGiftControls();
    try{
     const current=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);if(!current||current.isRecalled)break;
     const id=message.id+'_rmai_gift_'+index;
     let attached=await nativeGiftDB('messages',id);
-    if(!attached){const inMemory=giftLive(chat,id);if(inMemory){await giftCore.c4(chat,giftCopy(inMemory));attached=await nativeGiftDB('messages',id);}}
+    if(!attached){const inMemory=giftLive(chat,id);if(inMemory){await giftWait(giftCore.c4(chat,giftCopy(inMemory)),'图片消息保存等待超时。');attached=await nativeGiftDB('messages',id);}}
     if(!attached){const asset=await giftAsset(item);if(!asset){missing++;errors.push(normal(item.title)+'：未找到对应的已保存商品图。');continue;}const image=await giftImageData(asset);
-     if(stopped||!giftEnabled()||giftLive(chat,message.id)?.isRecalled)break;
-     const photo={id,conversationId:chat,type:'image',isMe:true,senderId:live.senderId,timestamp:Date.now(),content:image.content,text:'[礼物商品图] '+normal(item.title)+'（订单 '+String(live.cardData?.orderId||'')+'）。这是我赠送的这件商品的 AI 示意图。',isVisionRecognized:false,rmaiGift:{messageId:live.id,orderId:live.cardData?.orderId,index,display:image.display}};
-     await giftCore.E(chat,photo);attached=await nativeGiftDB('messages',id);if(!attached)throw Error('图片消息尚未成功保存，请稍后重试。');
+     const beforeSend=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);if(stopped||!giftEnabled()||!beforeSend||beforeSend.isRecalled)break;
+     const photo={id,conversationId:chat,type:'image',isMe:true,senderId:live.senderId,timestamp:Date.now(),content:image.content,text:'[礼物商品图] '+normal(item.title)+'（订单 '+String(live.cardData?.orderId||'')+'）。这是我赠送的这件商品的 AI 示意图。',isVisionRecognized:false,rmaiGift:{messageId:live.id,orderId:live.cardData?.orderId,index,display:image.display,visionRemote:!!image.remote}};
+     await giftWait(giftCore.E(chat,photo),'图片消息保存等待超时；请查看聊天里是否已经出现图片，再补发。');attached=await nativeGiftDB('messages',id);if(!attached)throw Error('图片消息尚未成功保存，请稍后重试。');
     }
     if(attached.isRecalled){journal.done.push(index);continue;}
     const display=attached.rmaiGift?.display||attached.content;
     const latest=giftLive(chat,message.id)||await nativeGiftDB('messages',message.id);
     if(!latest||latest.isRecalled)break;
-    const updated=giftCopy(latest);if(updated.cardData?.items?.[index]){updated.cardData.items[index].image=display;await giftCore.c4(chat,updated);}
+    const updated=giftCopy(latest);if(updated.cardData?.items?.[index]){updated.cardData.items[index].image=display;await giftWait(giftCore.c4(chat,updated),'赠送订单缩略图保存等待超时。');}
     const orderId=latest.cardData?.orderId;
     if(orderId){const order=await nativeGiftDB('market_orders',orderId,order=>{const target=order.items?.[index];if(target&&String(target.id)===String(item.id)&&normal(target.title)===normal(item.title))target.image=display;return order;});
      if(order)for(const list of Object.values(giftCore.v.market?.orders||{})){const target=list.find(o=>o.id===orderId);if(target)target.items=order.items;}
@@ -162,7 +232,7 @@
   }
   journal.state=errors.length||missing?'partial':stopped||!giftEnabled()?'paused':'done';journal.error=errors.join('\n')+(missing?'\n'+missing+' 件商品尚无可用配图，生成后可手动补发。':'');journal.updatedAt=Date.now();await giftJournal(journal);
   giftFailures=giftFailures.filter(j=>j.key!==key);if(journal.state!=='done')giftFailures.push(journal);
-  if(!stopped)giftNotice(sent?'礼物已附 '+sent+' 张商品图，下次聊天会交给识图模型。'+(journal.error?'部分图片未附上，具体原因见下方。':''):journal.error?'礼物图片未发送成功，具体原因见下方。':'礼物图片已处理。');return journal;
+  giftCurrent='';if(!stopped)giftNotice(sent?'已附 '+sent+' 张商品图。请到聊天里让角色回复，届时图片会随请求发送。'+(journal.error?'部分图片未附上，具体原因见下方。':''):journal.error?'礼物图片未发送成功，具体原因见下方。':'礼物图片已处理。');return journal;
  }
  async function scanGiftMessages(){if(stopped||!ready||!giftCore||giftBusy||!giftEnabled())return;giftBusy=true;
   try{for(const list of Object.values(giftCore.v.messages||{}))for(const message of list.slice(-40)){if(message.type!=='checkout_gift'||!message.isMe||message.isRecalled||Number(message.timestamp)<giftStarted||giftSeen.has(message.id))continue;giftSeen.add(message.id);await attachGift(message);if(stopped)break;}}
@@ -173,36 +243,24 @@
    const url=urls.find(s=>{try{const u=new URL(s,location.href);return u.origin===location.origin&&/\/ai-core-C8ElbRIq\.js$/.test(u.pathname);}catch{return false;}});
    if(!url)throw Error('系统聊天模块版本暂不兼容，未发送图片。');if(!navigator.locks?.request)throw Error('此浏览器不支持礼物附图锁，未启用自动附图。');
    const core=await import(url);if(!core.v?.messages||typeof core.E!=='function'||typeof core.c4!=='function')throw Error('系统图片消息接口已变化，未发送图片。');
-   if(stopped)return;giftCore=core;giftFailures=(await read('settings')).filter(j=>String(j.key).startsWith('gift:')&&j.state!=='done');giftStatus='已连接：新赠送订单会附上商品原图，供聊天模型识图。';clearInterval(giftTimer);giftTimer=setInterval(scanGiftMessages,1000);refreshGiftControls();scanGiftMessages();
+   if(stopped)return;giftCore=core;giftFailures=(await giftRead('settings')).filter(j=>String(j.key).startsWith('gift:')&&j.state!=='done');installGiftBridge();giftStatus='已连接：礼物图片直链将随聊天请求发送。';clearInterval(giftTimer);giftTimer=setInterval(scanGiftMessages,1000);refreshGiftControls();scanGiftMessages();
   }catch(error){giftStatus=String(error.message||'礼物图片功能未连接。');refreshGiftControls();}
  }
  function refreshGiftControls(){for(const section of document.querySelectorAll('.rmai-gift-settings'))renderGiftControls(section);}
- async function repairGiftImages(j){return navigator.locks.request('rmai-gift:'+j.chat+':'+j.messageId,{ifAvailable:true},lock=>{if(!lock)throw Error('其他页面正在处理这份礼物，请稍后查看。');return repairGiftImagesLocked(j);});}
- async function repairGiftImagesLocked(j){
-  const message=giftLive(j.chat,j.messageId)||await nativeGiftDB('messages',j.messageId);if(!message||message.isRecalled)throw Error('原赠送消息已删除或撤回，未补发。');
-  const config=await currentHostConfig(),items=message.cardData?.items||[];let changed=0;const errors=[];
-  for(let index=0;index<items.length;index++){if(stopped||!giftEnabled())break;if(j.done?.includes(index)||items[index].type==='ticket')continue;const asset=await giftAsset(items[index]);if(!asset)continue;
-   const url=safeImage(asset.hostedUrl||asset.url);if(asset.blob||!url.startsWith('https:')||isImgBB(url))continue;
-   try{giftStatus='正在将「'+normal(items[index].title)+'」转存到系统 ImgBB…';refreshGiftControls();const hosted=await uploadRemote(url,config);if(stopped)break;
-    const saved=await assetUpdate(asset.key,asset.createdAt,a=>({...a,url:hosted,hostedUrl:hosted,uploadedAt:Date.now()}));if(!saved)throw Error('商品图片已更新，请使用新图再补发。');const old=images.get(asset.key);if(old?.object)URL.revokeObjectURL(old.url);images.delete(asset.key);paintKey(asset.key);changed++;
-   }catch(error){errors.push(normal(items[index].title)+'：'+(error.name==='AbortError'?'ImgBB 转存超时，原图保留。':String(error.message||'转存失败，原图保留。')));}
-  }
-  if(errors.length){const next={...j,error:errors.join('\n'),state:'partial',updatedAt:Date.now()};await giftJournal(next);giftFailures=giftFailures.filter(x=>x.key!==j.key).concat(next);giftStatus='部分图片转存失败，已保留原图。';return;}
-  if(!stopped){giftStatus=changed?'转存完成，正在附图…':'正在使用现有图片补发…';refreshGiftControls();await attachGiftLocked(message,true);}
- }
  function renderGiftControls(section){
   section.replaceChildren();const heading=node('h3','','礼物商品图 · v'+VERSION),label=node('label','','赠送时附上商品图'),toggle=node('input');toggle.type='checkbox';toggle.checked=giftEnabled();toggle.addEventListener('change',()=>{pref.giftVision=toggle.checked;preferences();refreshGiftControls();});label.prepend(toggle);
-  section.append(heading,label,node('p','',giftStatus),node('p','','每件礼物附一张原生图片消息。等图片出现在聊天里，再让角色回复。图片最长边 512px；完成识图后可走系统图床同步。'));
-  if(!giftCore){const reconnect=button('重新连接礼物图片功能',()=>initGiftVision(),'rmai-action');section.append(reconnect);}
-  for(const j of giftFailures){const entry=node('div','rmai-row'),title=node('strong','',j.title||'赠送订单 '+j.messageId),detail=node('p','',j.error||'上次附图中断，可以继续未完成部分。');entry.append(title,node('p','','已附 '+(j.done?.length||0)+' 张'),detail);
-   const run=async repair=>{if(giftBusy||stopped)return;giftBusy=true;giftStatus=repair?'正在准备转存并补发…':'正在准备补发…';refreshGiftControls();try{if(repair)await repairGiftImages(j);else{const msg=giftLive(j.chat,j.messageId)||await nativeGiftDB('messages',j.messageId);if(!msg||msg.isRecalled)throw Error('原赠送消息已删除或撤回，未补发。');await attachGift(msg,true);}}
-    catch(error){const next={...j,state:'partial',error:String(error.message||'补发失败'),updatedAt:Date.now()};await giftJournal(next);giftFailures=giftFailures.filter(x=>x.key!==j.key).concat(next);giftStatus='补发未完成，具体原因见下方。';}
-    finally{giftBusy=false;refreshGiftControls();}};
-   const retry=button('补发未完成的图片',()=>run(false),'rmai-action');retry.disabled=!giftCore||giftBusy||!giftEnabled();entry.append(retry);
-   if(/下载|跨域|读取|转存|HTTP|fetch|load failed/i.test(j.error||'')){const repair=button('转存到系统 ImgBB 后补发',()=>run(true),'rmai-action');repair.disabled=retry.disabled;entry.append(repair,node('p','','只转存这份礼物尚未完成的外链图片，使用系统已保存的 ImgBB 配置。不会重新生图。'));}
-   section.append(entry);
+  section.append(heading,label,node('p','',giftStatus),node('p','',giftVisionStatus),node('p','','先附图，再让角色回复。已有图片直链直接随聊天请求发送，不需要浏览器下载或再次上传；本地图仍使用压缩图。'));
+  if(!giftCore)section.append(button('重新连接礼物图片功能',()=>initGiftVision(),'rmai-action'));
+  for(const j of giftFailures){const entry=node('div','rmai-row'),short=String(j.title||'赠送订单 '+j.messageId),title=node('strong','',short.length>52?short.slice(0,52)+'…':short),status=node('p','',giftBusy&&giftCurrent===j.key?giftStatus:'已附 '+(j.done?.length||0)+' 张');entry.append(title,status);
+   const oldDownload=/下载|跨域|load failed|failed to fetch/i.test(j.error||'');
+   if(j.error){entry.append(node('p','',oldDownload?'旧版记录：浏览器下载失败。现在可以直接附上已有商品图。':j.error.split('\n').slice(0,2).join('\n')));const details=node('details'),summary=node('summary','','查看商品和错误详情');details.append(summary,node('p','',j.error));entry.append(details);}
+   const run=async()=>{if(giftBusy||stopped)return;giftBusy=true;giftCurrent=j.key;giftStatus='正在附上已有商品图片…';refreshGiftControls();try{const msg=giftLive(j.chat,j.messageId)||await nativeGiftDB('messages',j.messageId);if(!msg||msg.isRecalled)throw Error('原赠送消息已删除或撤回，未补发。');await attachGift(msg,true);}
+    catch(error){const next={...j,state:'partial',error:String(error.message||'附图失败'),updatedAt:Date.now()};await giftJournal(next);giftFailures=giftFailures.filter(x=>x.key!==j.key).concat(next);giftStatus='附图未完成，具体原因见下方。';}
+    finally{giftBusy=false;giftCurrent='';refreshGiftControls();}};
+   const retry=button(giftBusy&&giftCurrent===j.key?'正在附图…':'附上这份礼物的商品图',run,'rmai-action');retry.disabled=!giftCore||giftBusy||!giftEnabled();entry.append(retry);section.append(entry);
   }
  }
+
  function giftControls(box){const section=node('div','rmai-gift-settings');box.append(section);renderGiftControls(section);}
 
  const kinds=[[/榴莲|durian/i,'durian dessert'],[/冰淇淋|冰激凌|冰酪|gelato/i,'ice cream dessert'],[/糯米.*芒果|mango sticky/i,'mango sticky rice'],[/蛋糕|提拉米苏|cake|tiramisu/i,'cake dessert'],[/披萨|pizza/i,'pizza'],[/汉堡|burger/i,'burger'],[/寿司|sushi/i,'sushi'],[/面|ramen|pasta/i,'noodle or pasta dish'],[/牛排|steak/i,'steak dish'],[/奶茶|咖啡|coffee|tea/i,'drink'],[/洗发|shampoo/i,'shampoo bottle'],[/沐浴|body wash/i,'body wash bottle'],[/香水|perfume/i,'perfume bottle'],[/牙膏|toothpaste/i,'toothpaste tube'],[/护肤|精华|skincare/i,'skincare cosmetic'],[/音响|音箱|speaker|olufsen/i,'audio speaker'],[/耳机|headphone|airpod/i,'headphones'],[/switch/i,'Nintendo Switch accessory'],[/手机|iphone|smartphone/i,'smartphone'],[/电脑|laptop|macbook/i,'laptop computer'],[/相机|camera/i,'camera'],[/包|handbag/i,'bag'],[/鞋|shoe/i,'shoes'],[/衣|衫|裙|coat|shirt|dress/i,'clothing'],[/项链|戒指|jewel/i,'jewelry'],[/花束|bouquet/i,'flower bouquet']];
@@ -318,7 +376,7 @@
  }
  async function itemPanel(r){const box=sheet(r.title),j=effectiveJob(r);previewKey=r.key;if(j?.hasImage){try{const src=await imageUrl(r.key);if(src&&box.isConnected){const im=node('img');im.src=src;im.alt=r.title;box.append(im);}}catch{}}if(!box.isConnected)return;box.append(node('p','',providerLabel()+'。提示词只包含商品资料，不额外调用聊天模型。'));if(j?.error)box.append(node('p','',j.error));if(j?.status==='unknown')box.append(node('p','','上次任务可能已经产生费用，但本机没有确认结果。请先查看生图后台，再决定是否重新生成。'));const input=node('textarea');input.setAttribute('aria-label','商品图片提示词');input.placeholder='正在整理商品资料…';box.append(input);promptFor(r).then(p=>{if(box.isConnected&&!input.value)input.value=p;}).catch(()=>{if(box.isConnected)input.placeholder='请填写商品图描述';});const act=button(j?.hasImage?'重新生成一张 · 可能计费':'生成这一件 · 可能计费',()=>{enqueue(r,input.value,true,!!j?.hasImage);close();},'rmai-action rmai-primary');act.disabled=j?.status==='running';box.append(act);}
  const observer=new MutationObserver(ms=>{if(ms.some(m=>!m.target.closest?.('.rmai-owned')&&(m.type==='attributes'||[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned')))))schedule(ms.some(m=>m.type==='childList'&&!m.target.closest?.('.rmai-owned')&&[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned'))));});document.addEventListener('click',onCategoryNavigation,true);observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
- window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy&&!giftBusy)db?.close();}};
+ window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;removeGiftBridge();clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy&&!giftBusy)db?.close();}};
  try{window.RochePlugin?.register({id:ID,name:'商城 AI 商品图 · 独立生图接口',version:VERSION});}catch{}
  discover();
  (async()=>{try{db=await database();if(stopped){db.close();return;}const savedValidation=await read('settings','validation');if(savedValidation)validation=savedValidation;if(['checking','generating','queued'].includes(validation.state))validation={...validation,state:'unverified',message:'上次验证没有确认结果，请先查看服务商记录，不会自动重新生图。'};const savedProvider=await read('settings','provider');if(savedProvider&&['system','preset','custom'].includes(savedProvider.source))provider={...provider,...savedProvider};for(const j of await read('jobs')){jobs.set(j.key,j.status==='running'&&j.owner!==owner?{...j,status:'unknown',error:'页面曾在生图时关闭或刷新。上次任务结果未确认，不会自动重新调用。'}:j);}for(const p of await productRows()){const k=rowKey(p);known.add(normal(p.title));seenProducts.add(k);}if(stopped){db.close();return;}preferences();ready=true;initGiftVision();fillBindingOptions();for(const r of records){r.isNew=false;paint(r).catch(()=>{});near.observe(r.img);}schedule();}catch(error){panelMessage=String(error?.message||'图片缓存不可用');for(const r of records)note(r,'图片缓存暂不可用');tool();}})();
