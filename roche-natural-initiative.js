@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.3.0
+/* Roche 自然主动 v1.3.1
  * Enhance browser Director DMs. Adaptive mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,13 +6,13 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', VERSION='1.3.0', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', VERSION='1.3.1', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
  const cfg={...defaults,...saved.config}, records=saved.records||{};
  let active=true, observer, queued=false, last='已就绪，等待下一次开口机会。', matched=0, bridge=null, bridgeAttempted=false, bridgeDetail='', ticking=false, trial=null;
- const panels=new Set(), pending=new Set();
+ const panels=new Set(), pending=new Set(), automatic=new Map();
  const bound=(v,a,b,f)=>Number.isFinite(Number(v))?Math.max(a,Math.min(b,Math.round(Number(v)))):f;
  const minute=s=>/^\d{2}:\d{2}$/.test(s)&&Number(s.slice(0,2))<24&&Number(s.slice(3))<60?Number(s.slice(0,2))*60+Number(s.slice(3)):null;
  function normalize(){cfg.min=bound(cfg.min,5,720,25);cfg.max=bound(cfg.max,cfg.min,1440,110);cfg.unanswered=bound(cfg.unanswered,1,5,2);cfg.periods=(Array.isArray(cfg.periods)?cfg.periods:defaults.periods).filter(p=>minute(p?.start)!==null&&minute(p?.end)!==null).slice(0,12);}
@@ -120,9 +120,13 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   matched++;const {meta,rec}=job,testing=!!trial?.busy&&trial.key===meta.key;
   // Server-side scheduled delivery is not under this page's control: enhance new job prompts only.
   const url=String(request?.url||input),scheduled=job.cloud&&/\/api\/schedule(?:\?|$)/.test(url);
-  if(!scheduled&&(pending.has(meta.key)||quietNow()||testing&&trial.requests>0||!testing&&(Date.now()<rec.next||rec.rounds>=cfg.unanswered))){
+  const permit=automatic.get(meta.key),ownCheck=!!permit&&!permit.used&&cfg.realistic;
+  const managed=cfg.realistic&&!!bridge&&!!navigator.locks?.request&&localStorage.getItem('noir_webpush_char_activity_enabled')!=='true';
+  if(!scheduled&&!testing&&managed&&!ownCheck){note(meta.char+'：真人模式由本页安排时机，本次原定时未调用模型。');return emptyResponse();}
+  if(!scheduled&&(pending.has(meta.key)||quietNow()||testing&&trial.requests>0||!testing&&((!ownCheck&&Date.now()<rec.next)||rec.rounds>=cfg.unanswered))){
    note(meta.char+'：这次保持安静，未调用模型。');return emptyResponse();
   }
+  if(ownCheck)permit.used=true;
   const next={...init,body:JSON.stringify(job.body)};
   const target=request?new Request(request,next):input;
   if(testing){trial.requests++;trial.phase='waiting';trial.message='已接入后台私聊请求，正在等待模型判断…';paintTrial();}
@@ -195,7 +199,11 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
      // Native invocation preserves its focus, active-chat, blocked-contact and trajectory guards.
      // Do not change the user's original interval or turn on any conversation's activity switch.
      rec.next=Date.now()+10*60000;save();count++;
-     await core.run(char.id,false,undefined,'message',conv.id,0);
+     // Reserve a single request before native preparation. The reservation backoff
+     // prevents rapid resubmission but must not block this very request in wrapped().
+     const permit={used:false};automatic.set(key,permit);
+     try{await core.run(char.id,false,undefined,'message',conv.id,0);}
+     finally{if(automatic.get(key)===permit)automatic.delete(key);}
     }
    }catch{note('真人模式本次调度中断，稍后再检查；没有自动重发请求。');}finally{ticking=false;}
   };
@@ -363,5 +371,5 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  observer=new MutationObserver(()=>{if(queued)return;queued=true;setTimeout(()=>{queued=false;if(active)mountSettings();},200);});
  observer.observe(document.body,{childList:true,subtree:true});mountSettings();
  window.RochePlugin.register({id:'roche-natural-initiative',name:'自然主动',version:VERSION,apps:[{id:'roche-natural-initiative-settings',name:'自然主动',icon:'chat_bubble_outline',mount(container){container.replaceChildren(panel());},unmount(container){for(const p of panels)if(container.contains(p))panels.delete(p);container.replaceChildren();}}]});
-  window.RocheNaturalInitiative={getStatus:()=>({version:VERSION,enabled:cfg.enabled,realistic:cfg.realistic,adaptiveSupported:!!bridge,build:bridge?.build||'',connection:bridgeDetail,matched,status:last}),destroy(){active=false;clearInterval(adaptiveTimer);observer?.disconnect();if(window.fetch===wrapped)window.fetch=original;for(const p of panels)p.remove();panels.clear();}};
+  window.RocheNaturalInitiative={getStatus:()=>({version:VERSION,enabled:cfg.enabled,realistic:cfg.realistic,adaptiveSupported:!!bridge,build:bridge?.build||'',connection:bridgeDetail,matched,status:last}),destroy(){active=false;clearInterval(adaptiveTimer);automatic.clear();observer?.disconnect();if(window.fetch===wrapped)window.fetch=original;for(const p of panels)p.remove();panels.clear();}};
 })();
