@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.2.0
+/* Roche 自然主动 v1.3.0
  * Enhance browser Director DMs. Adaptive mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', VERSION='1.2.0', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', VERSION='1.3.0', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
@@ -37,7 +37,13 @@
   const lastUser=userIndex<0?'':lines.slice(Math.max(0,userIndex-3),userIndex+1).join('\n');
   return {key:hash(char+'\n'+handle+'\n'+me),char,text,memory,unanswered,user:hash(lastUser),recent:lines.filter(s=>s.startsWith(char+':')).slice(-12).map(s=>norm(s.slice(char.length+1)))};
  }
- function rules(meta,rec){return `\n\n【自然主动 · 行为判断】
+ const isMessageTest=meta=>!!trial?.busy&&trial.key===meta.key&&trial.mode==='send';
+ function rules(meta,rec){
+  if(isMessageTest(meta))return `\n\n【用户手动点击：测试发一条】
+这一次是用户明确要求的单次发送测试，请生成一条可见私聊消息，用于验证模型生成和聊天发送链路。此轮覆盖前文“可以保持安静/没有动机不说话”的可选规则，不作是否开口的判断，不输出 [保持安静] 或空白；日常自动检查仍按原自然判断规则执行。
+依照当前角色的人设、说话语言、翻译设置、最近聊天及已有场景，生成一句自然、简短、不要求回复的话。可以轻轻接续已有话题或表达一句符合角色性格的想法；没有依据就用不涉及具体事件的简短表达。不要编造对方刚做了什么，不凭空改变双方地点，不追问“在干嘛/怎么不回/忙完了吗”，不要复述最近发过的原句。
+仅输出一行：[消息] ${meta.char}：正文。正文不可为空。不输出图片、计划、解释、测试报告或其他标签；不要在正文里说“正在测试”“我决定发消息”或“保持沉默”。这次只测试文字发送，不生成图片。\n`;
+  return `\n\n【自然主动 · 行为判断】
 这次只是一次可选择开口的机会，不是发消息的命令。先默默判断有没有具体的新动机；没有就只输出 [保持安静]，不要为了达到消息数量要求硬聊。判断过程不输出。
 1. 从近期记忆确认对方最后说去做什么、是否已经回来、有没有约定。对方说去洗澡、上课、开会、工作、睡觉、赶路或稍后回复，就按上下文和合理时长理解。不要因为过去一段时间就问“人呢/怎么不回/在干嘛/忙完了吗”，不要把沉默当作冷落，更不能擅自认定对方已经回来了。
 2. 同时确认你自己上一轮说去做什么、今天的轨迹和当地时间。事情合理推进后，可以带回一个具体的结果、感受或小细节；不要每轮都宣布同一件事完成。睡觉、专注、忙碌时通常保持安静。真实发生的约定、合理到点的提醒和具体关心可以优先，但不要编造紧急情况。
@@ -73,22 +79,33 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  function quietNow(){const d=new Date(),n=d.getHours()*60+d.getMinutes();return cfg.quiet&&cfg.periods.some(p=>{const a=minute(p.start),b=minute(p.end);return a===b|| (a<b?n>=a&&n<b:n>=a||n<b);});}
  function emptyResponse(){const value={choices:[{index:0,message:{role:'assistant',content:''},finish_reason:'stop'}],content:[],candidates:[{content:{role:'model',parts:[{text:''}]},finishReason:'STOP'}],usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0}};return new Response(JSON.stringify({...value,status:200,body:JSON.stringify(value),headers:{'content-type':'application/json'}}),{status:200,headers:{'Content-Type':'application/json'}});}
  function cleanReply(text,meta){
-  if(text.includes('[保持安静]'))return '';
-  text=text.replace(/\[下次检查\s*[:：]\s*\d{1,4}\s*\]/g,'');
-  const lines=text.split('\n').map(s=>s.trim()).filter(s=>/^\[(?:消息|私信|Message|msg|图片|Image)\]/i.test(s));
-  return lines.filter(line=>{if(/^\[(?:图片|Image)\]/i.test(line))return true;const body=line.replace(/^\[[^\]]+\]\s*[^:：]+[:：]/,'');return !meta.recent.includes(norm(body));}).slice(0,2).join('\n');
+  if(/^\s*\[保持安静\]\s*$/m.test(text))return {text:'',reason:'silence'};
+  text=text.replace(/\[下次检查\s*[:：]\s*\d{1,4}\s*\]/g,'').replace(/^```[^\n]*\n|\n```\s*$/g,'').trim();
+  if(!text)return {text:'',reason:'empty'};
+  const lines=text.split('\n').map(s=>s.trim()),accepted=[];let repeated=0,valid=0;
+  for(const line of lines){
+   const match=line.match(/^\[(消息|私信|Message|msg|图片|Image)\]\s*([^:：\n]+)[:：]\s*(.+)$/i);
+   if(!match)continue;
+   const image=/^(图片|Image)$/i.test(match[1]);if(image&&isMessageTest(meta))continue;
+   valid++;
+   if(!image&&meta.recent.includes(norm(match[3]))){repeated++;continue;}
+   accepted.push('['+(image?'图片':'消息')+'] '+meta.char+'：'+match[3].trim());
+  }
+  return {text:accepted.slice(0,isMessageTest(meta)?1:2).join('\n'),reason:accepted.length?'content':valid&&repeated===valid?'duplicate':'format'};
  }
- function rewriteReply(p,meta,depth=0){
+ function rewriteReply(p,meta,depth=0,limit={sent:0}){
   if(!p||typeof p!=='object'||depth>3)return {body:p,known:false,has:false};
-  let known=false,has=false,nextMinutes=null;const out={...p};
-  const clean=t=>{known=true;const hint=t.match(/\[下次检查\s*[:：]\s*(\d{1,4})\s*\]/);if(hint)nextMinutes=bound(hint[1],15,720,60);const s=cleanReply(t,meta);has ||= !!s;return s;};
+  let known=false,has=false,nextMinutes=null;const out={...p},reasons=new Set(),previews=[];
+  const clean=t=>{known=true;const hint=t.match(/\[下次检查\s*[:：]\s*(\d{1,4})\s*\]/);if(hint)nextMinutes=bound(hint[1],15,720,60);const r=cleanReply(t,meta);if(isMessageTest(meta)&&r.text){if(limit.sent)r.text='';else limit.sent++;}has ||= !!r.text;reasons.add(r.reason);previews.push(t);return r.text;};
+  const merge=r=>{known=true;has ||= r.has;nextMinutes=r.nextMinutes??nextMinutes;reasons.add(r.reason);if(r.preview)previews.push(r.preview);};
   if(Array.isArray(p.choices))out.choices=p.choices.map(c=>c.message&&typeof c.message.content==='string'?{...c,message:{...c.message,content:clean(c.message.content)}}:c);
   if(Array.isArray(p.content))out.content=p.content.map(c=>c.type==='text'?{...c,text:clean(c.text||'')}:c);
   if(typeof p.content==='string')out.content=clean(p.content);
   if(Array.isArray(p.candidates))out.candidates=p.candidates.map(c=>({...c,content:c.content?{...c.content,parts:(c.content.parts||[]).map(a=>typeof a.text==='string'?{...a,text:clean(a.text)}:a)}:c.content}));
-  if(p.body&&typeof p.body==='string'){try{const r=rewriteReply(JSON.parse(p.body),meta,depth+1);if(r.known){out.body=JSON.stringify(r.body);known=true;has ||= r.has;nextMinutes=r.nextMinutes;}}catch{}}
-  if(p.data&&typeof p.data==='object'){const r=rewriteReply(p.data,meta,depth+1);if(r.known){out.data=r.body;known=true;has ||= r.has;nextMinutes=r.nextMinutes;}}
-  return {body:out,known,has,nextMinutes};
+  if(p.body&&typeof p.body==='string'){try{const r=rewriteReply(JSON.parse(p.body),meta,depth+1,limit);if(r.known){out.body=JSON.stringify(r.body);merge(r);}}catch{}}
+  if(p.data&&typeof p.data==='object'){const r=rewriteReply(p.data,meta,depth+1,limit);if(r.known){out.data=r.body;merge(r);}}
+  const reason=has?'content':['format','duplicate','silence','empty'].find(s=>reasons.has(s))||'empty';
+  return {body:out,known,has,nextMinutes,reason,preview:Array.from(previews.join('\n')).slice(0,600).join('')};
  }
  function note(s){last=s;for(const p of panels){const el=p.querySelector('[data-state]');if(el)el.textContent=last;const count=p.querySelector('[data-count]');if(count)count.textContent='已识别 '+matched+' 次检查';}}
  async function wrapped(input,init){
@@ -119,11 +136,12 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    if(!active||!cfg.enabled)return response;
    const r=rewriteReply(parsed,meta);
    if(!r.known){if(testing){trial.phase='error';trial.message='接口已返回，但未找到支持的消息格式。';paintTrial();}note('返回格式无法识别，保留原系统处理。');return response;}
-   if(testing){trial.phase=r.has?'content':'quiet';trial.message=r.has?'已收到主动内容，正在交给聊天系统。':'接入成功：模型这次选择保持安静，或重复内容已被过滤。';paintTrial();}
+   const noContent={silence:'模型明确返回了 [保持安静]。',empty:'模型返回空白，没有消息正文。',duplicate:'模型返回的内容与近期消息重复，已被过滤。',format:'模型返回了内容，但不符合消息格式，未发送。'}[r.reason]||'未取得可发送的内容。';
+   if(testing){trial.preview=r.preview;trial.phase=r.has?'content':trial.mode==='send'||r.reason==='format'?'error':'quiet';trial.message=r.has?'已收到消息内容，正在交给聊天系统。':(trial.mode==='send'?'发送测试未完成：':'本次自然判断：')+noContent;paintTrial();}
    rec.seen=Date.now();
    rec.next=Date.now()+60000*(cfg.realistic?(r.nextMinutes||45+Math.random()*75):(r.has?cfg.min+Math.random()*(cfg.max-cfg.min):5+Math.random()*10));
    if(r.has)rec.rounds++;
-   save();note(meta.char+(r.has?'：返回了自然主动内容，交给原系统发送。':'：没有新的开口动机，这次不发消息。'));
+   save();note(meta.char+(r.has?'：返回了消息内容，交给原系统发送。':'：'+noContent));
    const headers=new Headers(response.headers);headers.delete('content-length');headers.delete('content-encoding');
    return new Response(JSON.stringify(r.body),{status:response.status,statusText:response.statusText,headers});
   }catch(error){if(testing){trial.phase='error';trial.message='请求中断或网络失败；没有自动重试。';paintTrial();}note(meta.char+'：请求中断，插件未自动重试。');throw error;}finally{pending.delete(meta.key);}
@@ -244,6 +262,8 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  [data-natural-initiative] .ni-report-row[data-ok="false"] span:last-child{color:#7a7a7a}
  [data-natural-initiative] .ni-trial{font-size:12px;line-height:1.7;padding:11px;margin-top:11px;border-radius:10px;background:#f1f1f1;color:#575757;overflow-wrap:anywhere}
  [data-natural-initiative] .ni-trial[data-phase="error"]{background:#f5f5f5;color:#727272}
+ [data-natural-initiative] .ni-decision{display:block;width:100%;padding:10px 0 2px;color:#666;font-size:11px!important;text-decoration:underline;text-underline-offset:3px}
+ [data-natural-initiative] .ni-response pre{max-height:160px;overflow:auto;margin:8px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#666}
  [data-natural-initiative] .ni-help{padding:13px 4px 0;color:#8c8c8c;font-size:11px;line-height:1.75}
  [data-natural-initiative] .ni-help summary{cursor:pointer;color:#727272;list-style:none;display:flex;align-items:center;gap:7px}
  [data-natural-initiative] .ni-help summary::before{content:'+';font-size:15px}
@@ -279,20 +299,20 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    if(cfg.realistic)rows.push(['多窗口协调',navigator.locks?.request?'支持':'此浏览器暂不支持',!!navigator.locks?.request]);
    const box=root.querySelector('[data-report]');box.replaceChildren();box.hidden=false;
    for(const [label,value,ok] of rows){const row=document.createElement('div');row.className='ni-report-row';row.dataset.ok=ok;const a=document.createElement('span'),b=document.createElement('span');a.textContent=label;b.textContent=value;row.append(a,b);box.append(row);}
-   root.querySelector('[data-test]').disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
+   for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
    return {core,info,cloud};
-  }catch{const box=root.querySelector('[data-report]');box.hidden=false;box.textContent='检查未完成，请刷新页面后再试。';root.querySelector('[data-test]').disabled=true;return {};}
+  }catch{const box=root.querySelector('[data-report]');box.hidden=false;box.textContent='检查未完成，请刷新页面后再试。';for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;return {};}
   finally{button.disabled=false;}
  }
  function paintTrial(){
-  for(const root of panels){const el=root.querySelector('[data-trial]');el.hidden=!trial;if(trial){el.textContent=trial.message;el.dataset.phase=trial.phase;}if(trial?.busy)root.querySelector('[data-test]').disabled=true;}
+  for(const root of panels){const el=root.querySelector('[data-trial]');el.hidden=!trial;if(trial){el.textContent=trial.message;el.dataset.phase=trial.phase;}const response=root.querySelector('[data-response]');response.hidden=!trial?.preview;root.querySelector('[data-response-text]').textContent=trial?.preview||'';if(trial?.busy)for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;}
  }
- async function testOnce(root){
+ async function testOnce(root,mode='send'){
   if(trial?.busy||ticking){note('已有一次检查正在处理，请等它结束后再试。');return;}
   const {core,info}=await inspect(root);
   if(!active||!core||!info||!cfg.enabled||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
   if(pending.has(info.key)||core.state.aiRequestState?.typingStatus?.[info.conv.id]){note('这个角色还有请求未结束，请稍后再试。');return;}
-  trial={key:info.key,busy:true,requests:0,phase:'starting',message:'正在读取 '+info.char.name+' 的上下文…'};paintTrial();
+  trial={key:info.key,mode,busy:true,requests:0,phase:'starting',preview:'',message:'正在读取 '+info.char.name+' 的上下文…'};paintTrial();
   const before=new Set((core.state.messages?.[info.conv.id]||[]).map(m=>m.id));
   const slow=setTimeout(()=>{if(trial?.busy){trial.message='本次处理超过 90 秒，仍在等待原系统。请勿重复点击；可以查看 API 服务商的请求记录。';paintTrial();}},90000);
   try{
@@ -305,7 +325,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    if(!trial.requests){trial.phase='error';trial.message='未捕获到可识别的后台私聊请求。可能被原系统专注限制拦下，或当前版本走了其他请求入口；这次无法确认接入。';}
    else if(trial.phase==='content'){
     const added=(core.state.messages?.[info.conv.id]||[]).filter(m=>!before.has(m.id)&&!m.isMe&&!m.isSystem&&m.type!=='system_notice');
-    trial.message=added.length?'试运行成功：已在 '+info.char.name+' 的聊天中新增 '+added.length+' 条消息，请返回查看。':'模型已返回内容，但暂未确认聊天入库；请返回会话查看。';
+    trial.message=added.length?(mode==='send'?'测试发送成功：':'自然判断已发送：')+'已在 '+info.char.name+' 的聊天中新增 '+added.length+' 条消息，请返回查看。':'模型已返回内容，但暂未确认聊天入库；请返回会话查看。';
    }else if(trial.phase==='waiting'||trial.phase==='starting'){trial.phase='error';trial.message='原系统已结束本轮，但插件未确认最终结果。请查看聊天与 API 请求记录，先不要重复试运行。';}
   }catch{trial.phase='error';trial.message='试运行中断；请检查原系统 API 和网络，没有自动重试。';}
   finally{clearTimeout(slow);if(trial){trial.busy=false;paintTrial();}for(const p of panels)await inspect(p);}
@@ -317,8 +337,8 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   '<div class="ni-card ni-row"><div><h4>启用自然主动</h4><p class="ni-hint">让每次开口，都有一点缘由</p></div>'+toggle('enabled','启用自然主动')+'</div>'+
   '<div class="ni-card"><h4>相处节奏</h4><div class="ni-segment" role="group" aria-label="主动模式"><button type="button" data-mode="normal">普通模式</button><button type="button" data-mode="realistic">真人模式</button></div><p class="ni-mode-note" data-mode-note></p><div data-normal><div class="ni-timing"><label class="ni-num"><input type="number" data-key="min" min="5" max="720" aria-label="最短冷却分钟"><span>分钟</span></label><span class="ni-dash">至</span><label class="ni-num"><input type="number" data-key="max" min="5" max="1440" aria-label="最长冷却分钟"><span>分钟</span></label></div><p class="ni-hint">一次主动后，随机安静这么久</p></div><div class="ni-row ni-divider"><div><p class="ni-label">留一点空间</p><p class="ni-hint">你没回复时，最多主动几轮</p></div><label class="ni-num ni-limit"><input type="number" data-key="unanswered" min="1" max="5" aria-label="未回复最多主动轮数"><span>轮</span></label></div><div class="ni-row ni-divider"><div><p class="ni-label">日常小分享</p><p class="ni-hint">依据人设与场景，延伸生活小事</p></div>'+toggle('sharing','允许日常小分享')+'</div></div>'+
   '<div class="ni-card"><div class="ni-row"><div><h4 class="ni-quiet-title">'+icon('moon')+' 勿扰时间</h4><p class="ni-hint">按这台设备的时间，留一段安静</p></div>'+toggle('quiet','启用勿扰时间')+'</div><div data-quiet-body><div data-periods></div><button type="button" class="ni-add" data-add>＋ 新增时段</button><p class="ni-hint">支持跨午夜；起止相同表示全天勿扰</p></div></div>'+
-  '<div class="ni-card" data-enabled="true"><div class="ni-row"><h4>检查与试运行</h4><span class="ni-meta" data-count>已识别 '+matched+' 次检查</span></div><div class="ni-status"><i class="ni-dot"></i><p data-state aria-live="polite"></p></div><select data-target aria-label="选择试运行角色" hidden></select><div class="ni-report" data-report hidden></div><div class="ni-actions"><button type="button" class="ni-btn" data-inspect>检查接入 · 免费</button><button type="button" class="ni-btn ni-primary" data-test disabled>试运行一次</button></div><p class="ni-hint">先检查再试运行；试运行会调用聊天模型，可能计费。<br>有内容会直接发到所选角色的聊天，没话说也可保持安静。</p><div class="ni-trial" data-trial role="status" hidden></div></div>'+
-  '<details class="ni-help"><summary>怎么测试？</summary><p>① 打开此处总开关，保留角色原来的“启用漫谈”。点“检查接入”，选择要测试的角色。</p><p>② 对角色说“我去忙一会，晚点回来”等符合当前聊天的话，再点“试运行一次”。这是立即试一轮，临时跳过等待时间与忙碌延迟，仍遵守勿扰和原系统专注限制。生成了内容或选择安静，都可说明请求接入成功。</p><p>③ 想验证日常效果，开启真人模式，退出聊天到小手机首页，保持网页运行。首次通常留出15～45分钟，再结合上下文决定是否开口；观察它是否承接前文，有没有反复追问。一次试运行不能验证长期节奏。</p><p>④ 想验证勿扰，新增一段覆盖当前时间的时段并开启勿扰，再检查接入，应提示“当前勿扰”。结束后删除测试时段。</p></details>'+
+  '<div class="ni-card" data-enabled="true"><div class="ni-row"><h4>检查与测试</h4><span class="ni-meta" data-count>已识别 '+matched+' 次检查</span></div><div class="ni-status"><i class="ni-dot"></i><p data-state aria-live="polite"></p></div><select data-target aria-label="选择试运行角色" hidden></select><div class="ni-report" data-report hidden></div><div class="ni-actions"><button type="button" class="ni-btn" data-inspect>检查接入 · 免费</button><button type="button" class="ni-btn ni-primary" data-test disabled>测试发一条</button></div><p class="ni-hint">明确要求模型生成一条文字，直接发到所选角色聊天。<br>会调用你的聊天模型，可能计费；不自动重试。</p><button type="button" class="ni-decision" data-decision disabled>模拟自然判断 · 可能保持安静</button><div class="ni-trial" data-trial role="status" hidden></div><details class="ni-help ni-response" data-response hidden><summary>本次模型返回 · 最多600字</summary><pre data-response-text></pre></details></div>'+
+  '<details class="ni-help"><summary>怎么测试？</summary><p>① 打开此处总开关，保留角色原来的“启用漫谈”。点“检查接入”，选择要测试的角色。</p><p>② 点“测试发一条”：本轮明确要求模型按角色人设、已有聊天生成一句话，用来检查消息能否真正出现在聊天中。只在这次测试跳过是否开口的判断，日常模式仍可安静。若模型未按要求输出，会显示失败原因，并可展开查看本次返回。</p><p>③ “模拟自然判断”使用日常规则，允许沉默。它用于观察此刻有没有开口动机；也会调用模型，可能计费。明确沉默、空白、重复过滤、格式错误会分别显示。</p><p>④ 想验证日常效果，开启真人模式，退出聊天到小手机首页，保持网页运行。首次通常留出15～45分钟，再结合上下文决定是否开口；观察它是否承接前文，有没有反复追问。一次发送测试不能验证长期节奏。</p><p>⑤ 想验证勿扰，新增一段覆盖当前时间的时段并开启勿扰，再检查接入，应提示“当前勿扰”。结束后删除测试时段。</p></details>'+
   '<details class="ni-help"><summary>运行与计费说明</summary><p>沿用原后台私聊的上下文和 API。模型判断与生成合并在一次调用中；选择安静也可能计费。免费检查不会调用聊天模型。</p><p>真人模式需要已适配的网页版与多窗口协调功能。网页被挂起或关闭时，本地调度暂停；已有云端任务不受本页控制，单次试运行可在云端开关开启时使用；日常真人调度需先关闭系统云端定时。</p><p>设置自动保存。关闭上方总开关立即恢复原系统行为；从插件管理禁用或卸载后请刷新页面。</p></details><p class="ni-footer">设置自动保存 · 只保存在当前浏览器</p>';
   root.querySelector('[data-add]').onclick=()=>{if(cfg.periods.length>=12)return;cfg.periods.push({start:'13:00',end:'14:00'});save();paintPeriods();};
   const changed=()=>{normalize();save();syncPanels();note(cfg.enabled?'设置已保存，等待下一次开口机会。':'自然主动已关闭，请打开上方总开关。');};
@@ -327,10 +347,11 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   root.querySelector('[data-inspect]').onclick=()=>inspect(root);
   root.querySelector('[data-target]').onchange=()=>inspect(root);
   root.querySelector('[data-test]').onclick=()=>testOnce(root);
+  root.querySelector('[data-decision]').onclick=()=>testOnce(root,'decision');
   panels.add(root);syncPanels();paintPeriods();paintTrial();root.querySelector('[data-state]').textContent=cfg.enabled?last:'自然主动已关闭，请打开上方总开关。';return root;
  }
- function syncPanels(){for(const root of panels){for(const input of root.querySelectorAll('[data-key]')){const key=input.dataset.key;if(input.type==='checkbox')input.checked=cfg[key];else input.value=cfg[key];}for(const button of root.querySelectorAll('[data-mode]'))button.setAttribute('aria-pressed',String((button.dataset.mode==='realistic')===cfg.realistic));root.querySelector('[data-normal]').hidden=cfg.realistic;root.querySelector('[data-mode-note]').textContent=cfg.realistic?'让角色根据上下文和生活日程，决定下次适合开口的机会。':'沿用原系统的检查时机，有话才说；发过消息后，给彼此留一点空隙。';root.querySelector('[data-quiet-body]').hidden=!cfg.quiet;root.querySelector('[data-enabled]').dataset.enabled=cfg.enabled;root.querySelector('[data-test]').disabled=true;root.querySelector('[data-report]').hidden=true;}}
- function paintPeriods(){for(const p of panels){const box=p.querySelector('[data-periods]');box.replaceChildren();cfg.periods.forEach((range,index)=>{const row=document.createElement('div');row.className='ni-period';for(const key of ['start','end']){const input=document.createElement('input');input.type='time';input.value=range[key];input.setAttribute('aria-label','勿扰时段'+(index+1)+(key==='start'?'开始':'结束'));input.onchange=()=>{if(minute(input.value)===null)return;range[key]=input.value;save();for(const panel of panels)panel.querySelector('[data-test]').disabled=true;paintPeriods();};row.append(input);if(key==='start'){const dash=document.createElement('span');dash.className='ni-dash';dash.textContent='—';row.append(dash);}}const remove=document.createElement('button');remove.type='button';remove.className='ni-remove';remove.textContent='×';remove.setAttribute('aria-label','删除勿扰时段'+(index+1));remove.onclick=()=>{cfg.periods.splice(index,1);save();for(const panel of panels)panel.querySelector('[data-test]').disabled=true;paintPeriods();};row.append(remove);box.append(row);});p.querySelector('[data-add]').disabled=cfg.periods.length>=12;}}
+ function syncPanels(){for(const root of panels){for(const input of root.querySelectorAll('[data-key]')){const key=input.dataset.key;if(input.type==='checkbox')input.checked=cfg[key];else input.value=cfg[key];}for(const button of root.querySelectorAll('[data-mode]'))button.setAttribute('aria-pressed',String((button.dataset.mode==='realistic')===cfg.realistic));root.querySelector('[data-normal]').hidden=cfg.realistic;root.querySelector('[data-mode-note]').textContent=cfg.realistic?'让角色根据上下文和生活日程，决定下次适合开口的机会。':'沿用原系统的检查时机，有话才说；发过消息后，给彼此留一点空隙。';root.querySelector('[data-quiet-body]').hidden=!cfg.quiet;root.querySelector('[data-enabled]').dataset.enabled=cfg.enabled;for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;root.querySelector('[data-report]').hidden=true;}}
+ function paintPeriods(){for(const p of panels){const box=p.querySelector('[data-periods]');box.replaceChildren();cfg.periods.forEach((range,index)=>{const row=document.createElement('div');row.className='ni-period';for(const key of ['start','end']){const input=document.createElement('input');input.type='time';input.value=range[key];input.setAttribute('aria-label','勿扰时段'+(index+1)+(key==='start'?'开始':'结束'));input.onchange=()=>{if(minute(input.value)===null)return;range[key]=input.value;save();for(const panel of panels)for(const button of panel.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;paintPeriods();};row.append(input);if(key==='start'){const dash=document.createElement('span');dash.className='ni-dash';dash.textContent='—';row.append(dash);}}const remove=document.createElement('button');remove.type='button';remove.className='ni-remove';remove.textContent='×';remove.setAttribute('aria-label','删除勿扰时段'+(index+1));remove.onclick=()=>{cfg.periods.splice(index,1);save();for(const panel of panels)for(const button of panel.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;paintPeriods();};row.append(remove);box.append(row);});p.querySelector('[data-add]').disabled=cfg.periods.length>=12;}}
  function mountSettings(){
   for(const p of panels)if(!p.isConnected)panels.delete(p);
   for(const el of document.querySelectorAll('h1,h2,h3,h4,div.uppercase')){
