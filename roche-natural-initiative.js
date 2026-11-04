@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.1.0
+/* Roche 自然主动 v1.2.0
  * Enhance browser Director DMs. Adaptive mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,12 +6,12 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', VERSION='1.1.0', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', VERSION='1.2.0', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
  const cfg={...defaults,...saved.config}, records=saved.records||{};
- let active=true, observer, queued=false, last='已就绪，等待下一次开口机会。', matched=0, bridge=null, bridgeAttempted=false, ticking=false, trial=null;
+ let active=true, observer, queued=false, last='已就绪，等待下一次开口机会。', matched=0, bridge=null, bridgeAttempted=false, bridgeDetail='', ticking=false, trial=null;
  const panels=new Set(), pending=new Set();
  const bound=(v,a,b,f)=>Number.isFinite(Number(v))?Math.max(a,Math.min(b,Math.round(Number(v)))):f;
  const minute=s=>/^\d{2}:\d{2}$/.test(s)&&Number(s.slice(0,2))<24&&Number(s.slice(3))<60?Number(s.slice(0,2))*60+Number(s.slice(3)):null;
@@ -129,12 +129,30 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   }catch(error){if(testing){trial.phase='error';trial.message='请求中断或网络失败；没有自动重试。';paintTrial();}note(meta.char+'：请求中断，插件未自动重试。');throw error;}finally{pending.delete(meta.key);}
  }
  window.fetch=wrapped;
+ function isNativeRunner(fn){
+  if(typeof fn!=='function')return false;
+  const source=Function.prototype.toString.call(fn).replace(/\s+/g,'');
+  // Verified against the original and current obfuscated native generator.
+  // Require the six-argument signature AND every field of its native scheduled-job payload.
+  const args=source.match(/^async\(([$\w]+),([$\w]+)=!1,([$\w]+),[$\w]+=[\s\S]{1,120},[$\w]+,[$\w]+=0\)=>\{/);
+  return !!args&&source.includes('&&void0!=='+args[3]+'){')&&['model:','messages:','temperature:','stream:!1','provider:','endpoint:','apiKey:','payload:','chatId:','charId:','jobKey:','pushType:','chatTitle:','delayMs:'].every(key=>source.includes(key));
+ }
+ function isNativeState(state){return !!state&&typeof state==='object'&&Array.isArray(state.conversations)&&Array.isArray(state.contacts)&&Array.isArray(state.personas)&&state.messages&&typeof state.messages==='object';}
  async function loadBridge(){
   if(bridge||bridgeAttempted)return bridge;bridgeAttempted=true;
-  // Fail closed when the app changes its exports. Never guess a minified function.
-  const entry=[...document.querySelectorAll('script[src],link[href]')].map(el=>el.src||el.href).concat(performance.getEntriesByType('resource').map(r=>r.name)).find(s=>/\/ai-core-CQV3BCOz\.js(?:\?|$)/.test(s));
-  if(!entry)return null;
-  try{const module=await import(entry);if(Array.isArray(module.t?.conversations)&&typeof module.dV==='function')bridge={state:module.t,run:module.dV};}catch{}
+  const loaded=[...document.querySelectorAll('script[src],link[href]')].map(el=>el.src||el.href).concat(performance.getEntriesByType('resource').map(r=>r.name));
+  const entries=[...new Set(loaded)].filter(s=>{try{const url=new URL(s,location.href);return url.origin===location.origin&&/\/ai-core-[\w-]+\.js$/.test(url.pathname);}catch{return false;}}).reverse().slice(0,3);
+  if(!entries.length){bridgeDetail='未找到已加载的私聊模块；请先打开一次角色聊天再检查。';return null;}
+  for(const entry of entries)try{
+   const module=await import(entry),name=new URL(entry,location.href).pathname.split('/').pop();
+   // Explicit adapters also keep isolated compatibility fixtures possible.
+   const verified={'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ']},adapter=verified[name];
+   if(adapter&&isNativeState(module[adapter[0]])&&typeof module[adapter[1]]==='function'){bridge={state:module[adapter[0]],run:module[adapter[1]],build:name};break;}
+   const values=Object.values(module),states=[...new Set(values.filter(isNativeState))],runners=[...new Set(values.filter(isNativeRunner))];
+   if(states.length===1&&runners.length===1){bridge={state:states[0],run:runners[0],build:name};break;}
+   bridgeDetail='已加载 '+name+'，但私聊函数特征未通过核对；未调用模型。';
+  }catch{bridgeDetail='私聊模块读取失败；请刷新网页后重试。';}
+  if(bridge)bridgeDetail='已识别原生私聊接口 · '+bridge.build;
   return bridge;
  }
  async function adaptiveTick(){
@@ -148,10 +166,8 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
     for(const conv of state.conversations){
      if(!active||!cfg.enabled||!cfg.realistic||quietNow()||count>=3)break;
      if(conv.type==='group'||conv.isGroup||!conv.localSettings?.directMessageActivity?.enabled||conv.localSettings?.isBlocked)continue;
-     const char=state.contacts?.find(c=>String(c.id)===String(conv.contactId||conv.id));
-     const persona=state.personas?.find(p=>p.id===(conv.localSettings?.myActivePersonaId||state.activePersonaId));
-     if(!char?.name||!persona?.name)continue;
-     const key=hash(char.name+'\n'+(char.handle||'')+'\n'+persona.name);
+     const info=conversationInfo(core,conv);if(!info)continue;
+     const {char,key}=info;
      const messages=(state.messages?.[conv.id]||[]).filter(m=>!m.isSystem&&m.type!=='system_notice').sort((a,b)=>a.timestamp-b.timestamp);
      const lastUser=[...messages].reverse().find(m=>m.isMe);
      let rec=records[key];
@@ -172,68 +188,68 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  const icons={sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',moon:'<path d="M20.8 13.1A9 9 0 0 1 10.9 3.2 9 9 0 1 0 20.8 13.1Z"/>',check:'<path d="m5 12 4 4L19 6"/>',arrow:'<path d="M5 12h14m-5-5 5 5-5 5"/>'};
  const icon=name=>'<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+icons[name]+'</svg>';
  const css=`
- [data-natural-initiative]{--ni-ink:#202a28;--ni-muted:#7b8582;--ni-line:#e8edeb;--ni-accent:#28644e;box-sizing:border-box!important;display:block!important;width:100%;max-width:560px;min-width:0;margin:20px auto;padding:18px;background:#f4f7f5;color:var(--ni-ink);border:1px solid #e9efeb;border-radius:24px;font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;text-align:left;letter-spacing:0;isolation:isolate}
+ [data-natural-initiative]{--ni-ink:#272727;--ni-muted:#828282;--ni-line:#ebebeb;--ni-accent:#111111;box-sizing:border-box!important;display:block!important;width:100%;max-width:560px;min-width:0;margin:20px auto;padding:18px;background:#f6f6f6;color:var(--ni-ink);border:1px solid #ededed;border-radius:24px;font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;text-align:left;letter-spacing:0;isolation:isolate}
  [data-natural-initiative] *{box-sizing:border-box!important;letter-spacing:normal}
  [data-natural-initiative] [hidden]{display:none!important}
  [data-natural-initiative] h3,[data-natural-initiative] h4,[data-natural-initiative] p{margin:0;padding:0;font:inherit;color:inherit}
  [data-natural-initiative] button,[data-natural-initiative] input,[data-natural-initiative] select{font:inherit!important;text-transform:none!important;letter-spacing:0!important;box-shadow:none!important;margin:0;color:var(--ni-ink);outline-offset:3px}
  [data-natural-initiative] button{border:0;cursor:pointer;min-width:0;line-height:1.4;background:transparent}
  [data-natural-initiative] button:disabled{opacity:.45;cursor:default}
- [data-natural-initiative] button:focus-visible,[data-natural-initiative] input:focus-visible,[data-natural-initiative] select:focus-visible,[data-natural-initiative] summary:focus-visible{outline:2px solid #61927c}
+ [data-natural-initiative] button:focus-visible,[data-natural-initiative] input:focus-visible,[data-natural-initiative] select:focus-visible,[data-natural-initiative] summary:focus-visible{outline:2px solid #818181}
  [data-natural-initiative] .ni-top{display:flex;align-items:center;gap:11px;margin-bottom:18px}
- [data-natural-initiative] .ni-icon{display:grid;place-items:center;width:39px;height:39px;border:1px solid #dce9e0;border-radius:13px;color:var(--ni-accent);background:#e8f0e9;flex:none}
+ [data-natural-initiative] .ni-icon{display:grid;place-items:center;width:39px;height:39px;border:1px solid #e4e4e4;border-radius:13px;color:var(--ni-accent);background:#ededed;flex:none}
  [data-natural-initiative] h3{font-weight:650;font-size:19px;line-height:1.3}
  [data-natural-initiative] .ni-sub{color:var(--ni-muted);font-size:11px;margin-top:3px}
- [data-natural-initiative] .ni-version{margin-left:auto;padding:4px 8px;font-size:10px;color:#849087;background:#e9eeea;border-radius:7px;white-space:nowrap}
+ [data-natural-initiative] .ni-version{margin-left:auto;padding:4px 8px;font-size:10px;color:#8b8b8b;background:#ececec;border-radius:7px;white-space:nowrap}
  [data-natural-initiative] .ni-card{background:#fff;border:1px solid var(--ni-line);border-radius:17px;padding:15px;margin-top:10px}
  [data-natural-initiative] .ni-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
  [data-natural-initiative] h4,[data-natural-initiative] .ni-label{font-size:14px;font-weight:600;line-height:1.45}
  [data-natural-initiative] .ni-hint{font-size:11px;line-height:1.65;color:var(--ni-muted);margin-top:4px;overflow-wrap:anywhere}
  [data-natural-initiative] .ni-switch{position:relative;display:block;flex:0 0 42px;width:42px;height:26px;cursor:pointer}
- [data-natural-initiative] .ni-switch input{appearance:none!important;-webkit-appearance:none!important;position:absolute;inset:0;width:42px!important;height:26px!important;border:0!important;border-radius:20px!important;padding:0!important;background:#dce2df!important;cursor:pointer;transition:background .18s}
+ [data-natural-initiative] .ni-switch input{appearance:none!important;-webkit-appearance:none!important;position:absolute;inset:0;width:42px!important;height:26px!important;border:0!important;border-radius:20px!important;padding:0!important;background:#e0e0e0!important;cursor:pointer;transition:background .18s}
  [data-natural-initiative] .ni-switch input:checked{background:var(--ni-accent)!important}
  [data-natural-initiative] .ni-switch span{pointer-events:none;position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transition:transform .18s}
  [data-natural-initiative] .ni-switch input:checked+span{transform:translateX(16px)}
- [data-natural-initiative] .ni-segment{display:grid;grid-template-columns:1fr 1fr;gap:3px;background:#f0f3f1;border-radius:11px;padding:4px;margin-top:12px}
- [data-natural-initiative] .ni-segment button{font-size:12px!important;padding:9px 5px;border-radius:8px;color:#7b8582}
- [data-natural-initiative] .ni-segment button[aria-pressed="true"]{background:#fff;color:var(--ni-accent);font-weight:600;box-shadow:0 1px 4px #2444300d!important}
- [data-natural-initiative] .ni-mode-note{font-size:12px;line-height:1.7;color:#69766e;margin-top:11px;min-height:40px}
+ [data-natural-initiative] .ni-segment{display:grid;grid-template-columns:1fr 1fr;gap:3px;background:#f2f2f2;border-radius:11px;padding:4px;margin-top:12px}
+ [data-natural-initiative] .ni-segment button{font-size:12px!important;padding:9px 5px;border-radius:8px;color:#828282}
+ [data-natural-initiative] .ni-segment button[aria-pressed="true"]{background:#fff;color:var(--ni-accent);font-weight:600;box-shadow:0 1px 4px #3838380d!important}
+ [data-natural-initiative] .ni-mode-note{font-size:12px;line-height:1.7;color:#717171;margin-top:11px;min-height:40px}
  [data-natural-initiative] .ni-timing{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin-top:12px}
- [data-natural-initiative] .ni-num{display:flex;align-items:center;justify-content:center;gap:4px;background:#f7f9f7;border:1px solid var(--ni-line);border-radius:10px;padding:9px 6px;min-width:0}
+ [data-natural-initiative] .ni-num{display:flex;align-items:center;justify-content:center;gap:4px;background:#f8f8f8;border:1px solid var(--ni-line);border-radius:10px;padding:9px 6px;min-width:0}
  [data-natural-initiative] .ni-num input{appearance:textfield;-moz-appearance:textfield;width:45px!important;min-width:0!important;max-width:100%;border:0!important;background:transparent!important;padding:0!important;text-align:center;font-size:17px!important;line-height:1.4!important;font-weight:600!important}
  [data-natural-initiative] input::-webkit-inner-spin-button{appearance:none}
- [data-natural-initiative] .ni-num span,[data-natural-initiative] .ni-dash{font-size:10px;color:#8e9993}
+ [data-natural-initiative] .ni-num span,[data-natural-initiative] .ni-dash{font-size:10px;color:#959595}
  [data-natural-initiative] .ni-divider{border-top:1px solid var(--ni-line);margin-top:13px;padding-top:13px}
  [data-natural-initiative] .ni-limit{max-width:90px;flex:none;padding:7px 9px}
  [data-natural-initiative] .ni-limit input{width:24px!important;font-size:15px!important}
  [data-natural-initiative] .ni-quiet-title{display:flex;align-items:center;gap:7px}
  [data-natural-initiative] .ni-quiet-title svg{width:17px;height:17px;color:var(--ni-accent)}
  [data-natural-initiative] .ni-period{display:grid;grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) 28px;gap:5px;align-items:center;margin-top:9px}
- [data-natural-initiative] input[type="time"]{appearance:none!important;-webkit-appearance:none!important;display:block!important;width:100%!important;min-width:0!important;max-width:100%!important;min-height:39px;border:1px solid var(--ni-line)!important;border-radius:10px!important;padding:8px 5px!important;background:#f7f9f7!important;text-align:center;font-size:13px!important;line-height:1.4!important}
+ [data-natural-initiative] input[type="time"]{appearance:none!important;-webkit-appearance:none!important;display:block!important;width:100%!important;min-width:0!important;max-width:100%!important;min-height:39px;border:1px solid var(--ni-line)!important;border-radius:10px!important;padding:8px 5px!important;background:#f8f8f8!important;text-align:center;font-size:13px!important;line-height:1.4!important}
  [data-natural-initiative] input[type="time"]::-webkit-date-and-time-value{min-width:0;text-align:center}
  [data-natural-initiative] input[type="time"]::-webkit-calendar-picker-indicator{display:none}
- [data-natural-initiative] .ni-remove{height:32px;padding:0;font-size:20px!important;color:#97a39c}
- [data-natural-initiative] .ni-add{display:block;width:100%;padding:10px;margin-top:10px;border:1px dashed #dce6de;border-radius:10px;color:var(--ni-accent);font-size:12px!important}
- [data-natural-initiative] .ni-meta{font-size:10px;color:#8a968e}
- [data-natural-initiative] .ni-status{display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.65;margin-top:11px;color:#54655b;overflow-wrap:anywhere}
- [data-natural-initiative] .ni-dot{flex:none;width:6px;height:6px;border-radius:50%;margin-top:7px;background:#4c8d67}
- [data-natural-initiative] [data-enabled="false"] .ni-dot{background:#b1bab4}
+ [data-natural-initiative] .ni-remove{height:32px;padding:0;font-size:20px!important;color:#9f9f9f}
+ [data-natural-initiative] .ni-add{display:block;width:100%;padding:10px;margin-top:10px;border:1px dashed #e2e2e2;border-radius:10px;color:var(--ni-accent);font-size:12px!important}
+ [data-natural-initiative] .ni-meta{font-size:10px;color:#929292}
+ [data-natural-initiative] .ni-status{display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.65;margin-top:11px;color:#5f5f5f;overflow-wrap:anywhere}
+ [data-natural-initiative] .ni-dot{flex:none;width:6px;height:6px;border-radius:50%;margin-top:7px;background:#757575}
+ [data-natural-initiative] [data-enabled="false"] .ni-dot{background:#b7b7b7}
  [data-natural-initiative] .ni-actions{display:grid;grid-template-columns:1fr 1.35fr;gap:8px;margin-top:13px}
- [data-natural-initiative] .ni-btn{padding:10px 7px;border:1px solid #dce5de;border-radius:10px;background:#f6f8f6;font-size:12px!important;font-weight:550}
+ [data-natural-initiative] .ni-btn{padding:10px 7px;border:1px solid #e2e2e2;border-radius:10px;background:#f7f7f7;font-size:12px!important;font-weight:550}
  [data-natural-initiative] .ni-primary{background:var(--ni-accent);border-color:var(--ni-accent);color:#fff}
- [data-natural-initiative] select{appearance:auto!important;display:block;width:100%!important;max-width:100%;min-width:0;margin-top:12px;padding:10px;border:1px solid var(--ni-line);border-radius:10px;background:#fafcfb;font-size:12px!important}
- [data-natural-initiative] .ni-report{margin-top:12px;padding:10px 11px;background:#f6f8f6;border-radius:10px}
+ [data-natural-initiative] select{appearance:auto!important;display:block;width:100%!important;max-width:100%;min-width:0;margin-top:12px;padding:10px;border:1px solid var(--ni-line);border-radius:10px;background:#fbfbfb;font-size:12px!important}
+ [data-natural-initiative] .ni-report{margin-top:12px;padding:10px 11px;background:#f7f7f7;border-radius:10px}
  [data-natural-initiative] .ni-report-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;font-size:11px;padding:4px 0;line-height:1.55}
- [data-natural-initiative] .ni-report-row span:last-child{max-width:67%;text-align:right;overflow-wrap:anywhere;color:#597361}
- [data-natural-initiative] .ni-report-row[data-ok="false"] span:last-child{color:#9c714b}
- [data-natural-initiative] .ni-trial{font-size:12px;line-height:1.7;padding:11px;margin-top:11px;border-radius:10px;background:#edf3ee;color:#44624e;overflow-wrap:anywhere}
- [data-natural-initiative] .ni-trial[data-phase="error"]{background:#fcf4e9;color:#976a38}
- [data-natural-initiative] .ni-help{padding:13px 4px 0;color:#859088;font-size:11px;line-height:1.75}
- [data-natural-initiative] .ni-help summary{cursor:pointer;color:#68786d;list-style:none;display:flex;align-items:center;gap:7px}
+ [data-natural-initiative] .ni-report-row span:last-child{max-width:67%;text-align:right;overflow-wrap:anywhere;color:#696969}
+ [data-natural-initiative] .ni-report-row[data-ok="false"] span:last-child{color:#7a7a7a}
+ [data-natural-initiative] .ni-trial{font-size:12px;line-height:1.7;padding:11px;margin-top:11px;border-radius:10px;background:#f1f1f1;color:#575757;overflow-wrap:anywhere}
+ [data-natural-initiative] .ni-trial[data-phase="error"]{background:#f5f5f5;color:#727272}
+ [data-natural-initiative] .ni-help{padding:13px 4px 0;color:#8c8c8c;font-size:11px;line-height:1.75}
+ [data-natural-initiative] .ni-help summary{cursor:pointer;color:#727272;list-style:none;display:flex;align-items:center;gap:7px}
  [data-natural-initiative] .ni-help summary::before{content:'+';font-size:15px}
  [data-natural-initiative] .ni-help[open] summary::before{content:'−'}
  [data-natural-initiative] .ni-help p{margin-top:8px}
- [data-natural-initiative] .ni-footer{font-size:10px;color:#9aa59e;text-align:center;padding-top:14px}
+ [data-natural-initiative] .ni-footer{font-size:10px;color:#a1a1a1;text-align:center;padding-top:14px}
  @media(max-width:360px){[data-natural-initiative]{padding:12px;border-radius:19px}[data-natural-initiative] .ni-card{padding:12px}[data-natural-initiative] .ni-report-row{gap:6px}}
  @media(prefers-reduced-motion:reduce){[data-natural-initiative] .ni-switch input,[data-natural-initiative] .ni-switch span{transition:none}}
  `;
@@ -259,11 +275,11 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    if(!bridge)bridgeAttempted=false;
    const core=await loadBridge(),info=core?fillTargets(root,core):null;
    const cloud=localStorage.getItem('noir_webpush_char_activity_enabled')==='true';
-   const rows=[['自然主动',cfg.enabled?'已开启':'请先打开上方总开关',cfg.enabled],['网页接入',core?'已适配，可试运行':'未适配此版本，暂不能手动试运行',!!core],['原会话漫谈',info?(info.conv.localSettings?.directMessageActivity?.enabled?'已开启 · '+info.char.name:'请先开启此角色的“启用漫谈”'):'未识别到可用私聊',!!info?.conv.localSettings?.directMessageActivity?.enabled],['勿扰时段',quietNow()?'当前勿扰，不会试运行':'当前可检查',!quietNow()],['云端定时',cloud?'请关闭云端任务后测试本地模式':'未开启',!cloud]];
+   const rows=[['自然主动',cfg.enabled?'已开启':'请先打开上方总开关',cfg.enabled],['网页接入',core?'已适配，可试运行':bridgeDetail||'未适配此版本，暂不能手动试运行',!!core],['原会话漫谈',info?(info.conv.localSettings?.directMessageActivity?.enabled?'已开启 · '+info.char.name:'请先开启此角色的“启用漫谈”'):core?'暂无可用私聊，请先打开一次角色聊天':'待网页接入后读取',!!info?.conv.localSettings?.directMessageActivity?.enabled],['勿扰时段',quietNow()?'当前勿扰，不会试运行':'当前可检查',!quietNow()],['云端定时',cloud?'已开启；单次测试可用，真人自动调度需关闭':'未开启',!cloud]];
    if(cfg.realistic)rows.push(['多窗口协调',navigator.locks?.request?'支持':'此浏览器暂不支持',!!navigator.locks?.request]);
    const box=root.querySelector('[data-report]');box.replaceChildren();box.hidden=false;
    for(const [label,value,ok] of rows){const row=document.createElement('div');row.className='ni-report-row';row.dataset.ok=ok;const a=document.createElement('span'),b=document.createElement('span');a.textContent=label;b.textContent=value;row.append(a,b);box.append(row);}
-   root.querySelector('[data-test]').disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow()||cloud;
+   root.querySelector('[data-test]').disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
    return {core,info,cloud};
   }catch{const box=root.querySelector('[data-report]');box.hidden=false;box.textContent='检查未完成，请刷新页面后再试。';root.querySelector('[data-test]').disabled=true;return {};}
   finally{button.disabled=false;}
@@ -273,8 +289,8 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  }
  async function testOnce(root){
   if(trial?.busy||ticking){note('已有一次检查正在处理，请等它结束后再试。');return;}
-  const {core,info,cloud}=await inspect(root);
-  if(!active||!core||!info||cloud||!cfg.enabled||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
+  const {core,info}=await inspect(root);
+  if(!active||!core||!info||!cfg.enabled||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
   if(pending.has(info.key)||core.state.aiRequestState?.typingStatus?.[info.conv.id]){note('这个角色还有请求未结束，请稍后再试。');return;}
   trial={key:info.key,busy:true,requests:0,phase:'starting',message:'正在读取 '+info.char.name+' 的上下文…'};paintTrial();
   const before=new Set((core.state.messages?.[info.conv.id]||[]).map(m=>m.id));
@@ -282,6 +298,8 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   try{
    // A deliberate one-shot test skips normal timing and native hot-chat/life delays.
    // It still respects this plugin's master switch, quiet hours and native focus guards.
+   // An undefined delay uses the local request path in both verified native versions,
+   // including when cloud scheduling is enabled. Do not change the global cloud switch.
    await core.run(info.char.id,true,undefined,'message',info.conv.id,0);
    if(!active)return;
    if(!trial.requests){trial.phase='error';trial.message='未捕获到可识别的后台私聊请求。可能被原系统专注限制拦下，或当前版本走了其他请求入口；这次无法确认接入。';}
@@ -301,7 +319,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   '<div class="ni-card"><div class="ni-row"><div><h4 class="ni-quiet-title">'+icon('moon')+' 勿扰时间</h4><p class="ni-hint">按这台设备的时间，留一段安静</p></div>'+toggle('quiet','启用勿扰时间')+'</div><div data-quiet-body><div data-periods></div><button type="button" class="ni-add" data-add>＋ 新增时段</button><p class="ni-hint">支持跨午夜；起止相同表示全天勿扰</p></div></div>'+
   '<div class="ni-card" data-enabled="true"><div class="ni-row"><h4>检查与试运行</h4><span class="ni-meta" data-count>已识别 '+matched+' 次检查</span></div><div class="ni-status"><i class="ni-dot"></i><p data-state aria-live="polite"></p></div><select data-target aria-label="选择试运行角色" hidden></select><div class="ni-report" data-report hidden></div><div class="ni-actions"><button type="button" class="ni-btn" data-inspect>检查接入 · 免费</button><button type="button" class="ni-btn ni-primary" data-test disabled>试运行一次</button></div><p class="ni-hint">先检查再试运行；试运行会调用聊天模型，可能计费。<br>有内容会直接发到所选角色的聊天，没话说也可保持安静。</p><div class="ni-trial" data-trial role="status" hidden></div></div>'+
   '<details class="ni-help"><summary>怎么测试？</summary><p>① 打开此处总开关，保留角色原来的“启用漫谈”。点“检查接入”，选择要测试的角色。</p><p>② 对角色说“我去忙一会，晚点回来”等符合当前聊天的话，再点“试运行一次”。这是立即试一轮，临时跳过等待时间与忙碌延迟，仍遵守勿扰和原系统专注限制。生成了内容或选择安静，都可说明请求接入成功。</p><p>③ 想验证日常效果，开启真人模式，退出聊天到小手机首页，保持网页运行。首次通常留出15～45分钟，再结合上下文决定是否开口；观察它是否承接前文，有没有反复追问。一次试运行不能验证长期节奏。</p><p>④ 想验证勿扰，新增一段覆盖当前时间的时段并开启勿扰，再检查接入，应提示“当前勿扰”。结束后删除测试时段。</p></details>'+
-  '<details class="ni-help"><summary>运行与计费说明</summary><p>沿用原后台私聊的上下文和 API。模型判断与生成合并在一次调用中；选择安静也可能计费。免费检查不会调用聊天模型。</p><p>真人模式需要已适配的网页版与多窗口协调功能。网页被挂起或关闭时，本地调度暂停；已有云端任务不受本页控制，请关闭云端定时再测试。</p><p>设置自动保存。关闭上方总开关立即恢复原系统行为；从插件管理禁用或卸载后请刷新页面。</p></details><p class="ni-footer">设置自动保存 · 只保存在当前浏览器</p>';
+  '<details class="ni-help"><summary>运行与计费说明</summary><p>沿用原后台私聊的上下文和 API。模型判断与生成合并在一次调用中；选择安静也可能计费。免费检查不会调用聊天模型。</p><p>真人模式需要已适配的网页版与多窗口协调功能。网页被挂起或关闭时，本地调度暂停；已有云端任务不受本页控制，单次试运行可在云端开关开启时使用；日常真人调度需先关闭系统云端定时。</p><p>设置自动保存。关闭上方总开关立即恢复原系统行为；从插件管理禁用或卸载后请刷新页面。</p></details><p class="ni-footer">设置自动保存 · 只保存在当前浏览器</p>';
   root.querySelector('[data-add]').onclick=()=>{if(cfg.periods.length>=12)return;cfg.periods.push({start:'13:00',end:'14:00'});save();paintPeriods();};
   const changed=()=>{normalize();save();syncPanels();note(cfg.enabled?'设置已保存，等待下一次开口机会。':'自然主动已关闭，请打开上方总开关。');};
   for(const el of root.querySelectorAll('[data-key]'))el.addEventListener('change',()=>{const key=el.dataset.key;cfg[key]=el.type==='checkbox'?el.checked:Number(el.value);changed();});
@@ -324,5 +342,5 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  observer=new MutationObserver(()=>{if(queued)return;queued=true;setTimeout(()=>{queued=false;if(active)mountSettings();},200);});
  observer.observe(document.body,{childList:true,subtree:true});mountSettings();
  window.RochePlugin.register({id:'roche-natural-initiative',name:'自然主动',version:VERSION,apps:[{id:'roche-natural-initiative-settings',name:'自然主动',icon:'chat_bubble_outline',mount(container){container.replaceChildren(panel());},unmount(container){for(const p of panels)if(container.contains(p))panels.delete(p);container.replaceChildren();}}]});
- window.RocheNaturalInitiative={getStatus:()=>({version:VERSION,enabled:cfg.enabled,realistic:cfg.realistic,adaptiveSupported:!!bridge,matched,status:last}),destroy(){active=false;clearInterval(adaptiveTimer);observer?.disconnect();if(window.fetch===wrapped)window.fetch=original;for(const p of panels)p.remove();panels.clear();}};
+  window.RocheNaturalInitiative={getStatus:()=>({version:VERSION,enabled:cfg.enabled,realistic:cfg.realistic,adaptiveSupported:!!bridge,build:bridge?.build||'',connection:bridgeDetail,matched,status:last}),destroy(){active=false;clearInterval(adaptiveTimer);observer?.disconnect();if(window.fetch===wrapped)window.fetch=original;for(const p of panels)p.remove();panels.clear();}};
 })();
