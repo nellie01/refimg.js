@@ -1,4 +1,4 @@
-/* GPhone · TA 手机提醒事项 v1.1.0 */
+/* GPhone · TA 手机提醒事项 v1.2.0 */
 (() => {
   'use strict';
   if (!window.RochePlugin?.register) return;
@@ -7,25 +7,30 @@
   const listSelector = '[data-v-84b6dad5].w-full.h-full';
   const detailSelector = '[data-v-7ef33549].w-full.h-full';
   const types = [
-    ['today', '今天', '#007aff', 'sun'],
+    ['today', '今天', '#007aff', 'day'],
     ['scheduled', '计划', '#e83745', 'calendar'],
-    ['all', '全部', '#414148', 'list'],
-    ['urgent', '紧急', '#ed276d', 'flag'],
+    ['all', '全部', '#414148', 'tray'],
+    ['flagged', '旗标', '#b86a17', 'flag'],
+    ['urgent', '紧急', '#ed276d', 'alarm'],
     ['done', '完成', '#65747e', 'check']
   ];
   const lists = [
     ['work', '工作', '#5856d6', 'list'],
-    ['shopping', '日常采购', '#168a46', 'bag'],
+    ['shopping', '日常采购', '#20c568', 'carrot'],
     ['life', '生活', '#ac5600', 'list'],
     ['inbox', '未分类', '#68717d', 'list']
   ];
   const paths = {
-    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M19 5l-1.5 1.5m-11 11L5 19"/>',
-    calendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18"/>',
+    day: '<rect x="2.5" y="3.5" width="19" height="17" rx="2"/><path d="M3.5 6h17" stroke-width="3.5"/>',
+    calendar: '<rect x="2.5" y="3.5" width="19" height="17" rx="2"/><path d="M3.5 6h17" stroke-width="3.5"/><path d="M6.5 11h.1m3.6 0h.1m3.6 0h.1m3.6 0h.1m-11.2 3h.1m3.6 0h.1m3.6 0h.1m3.6 0h.1m-11.2 3h.1m3.6 0h.1m3.6 0h.1"/>',
+    tray: '<path d="M2 11l4-6h12l4 6v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/><path fill="currentColor" stroke="none" d="M2 11h7a3 3 0 0 0 6 0h7v8H2z"/>',
     list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.1M4 12h.1M4 18h.1"/>',
-    flag: '<path d="M5 22V3c5-4 9 4 14 0v12c-5 4-9-4-14 0"/>',
-    check: '<path d="m5 12 5 5L19 7"/>',
-    bag: '<rect x="4" y="8" width="16" height="13" rx="3"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/>'
+    flag: '<path fill="currentColor" d="M4 4c5-3 10 3 16 0v10c-6 3-11-3-16 0z"/><path d="M4 4v17"/>',
+    alarm: '<path d="m4 5 3-2m13 2-3-2M7 18l-2 3m12-3 2 3"/><circle cx="12" cy="12.5" r="7.5" fill="currentColor"/><path d="M12 8v4.5H8.5" stroke="#e6749b" stroke-width="1.5"/>',
+    check: '<path d="m4 13 5 5L20 5" stroke-width="3"/>',
+    carrot: '<path d="M15 9c-1-2-4-2-6 0L3 21l12-6c2-1 2-4 0-6z" fill="currentColor"/><path d="M15 9c1-4 4-5 4-5m-4 5c3 0 5-1 6-3m-6 3c-1-3 0-5 1-6"/><path d="m8 13 2 2m2-5 2 2" stroke="#20c568" stroke-width="1.3"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>',
+    more: '<path d="M5 12h.1m6.9 0h.1m6.9 0h.1" stroke-width="3.2"/>'
   };
   window.GPhoneTAReminders?.stop();
   const nativeFetch = window.fetch;
@@ -94,7 +99,8 @@ Content:
   function badge(color, icon) {
     const node = el('span', 'gpr-badge');
     node.style.background = color;
-    node.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths[icon] + '</svg>';
+    const date = icon === 'day' ? '<text x="12" y="16.5" text-anchor="middle" fill="currentColor" stroke="none" font-size="8.8" font-weight="750">' + new Date().getDate() + '</text>' : '';
+    node.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths[icon] + date + '</svg>';
     return node;
   }
   function localDate(date = new Date()) {
@@ -238,7 +244,10 @@ Content:
     [data-gpr-list]>.sticky,[data-gpr-list]>.gpr-search{background:#f2f2f7!important}
     [data-gpr-list="category"],[data-gpr-list="category"]>.sticky,[data-gpr-list="category"]>.gpr-search{background:#fff!important}
     [data-gpr-list="reminder"],[data-gpr-list="reminder"]>.sticky{background:#fff!important}
-    [data-gpr-list="reminder"]>.sticky,[data-gpr-list="reminder"]>.gpr-search{display:none!important}
+    [data-gpr-list="reminder"]>.sticky>:not(.gpr-reminder-bar),
+    [data-gpr-list="reminder"]>.gpr-search,
+    [data-gpr-list="home"]:not([data-gpr-search-open])>.gpr-search,
+    [data-gpr-list="home"]>.sticky .gpr-native-menu{display:none!important}
     [data-gpr-list]>.sticky .tracking-widest{opacity:0}
     [data-gpr-list]>.sticky button,[data-gpr-detail]>.gpr-detail-bar button{border-radius:999px;background:#fff!important;color:#17171b!important;min-width:42px;min-height:40px}
     [data-gpr-list]>.sticky button .material-symbols-outlined{color:#17171b!important}
@@ -246,25 +255,34 @@ Content:
     [data-gpr-list] .gpr-native-group,[data-gpr-list] .gpr-native-empty,[data-gpr-list] .gpr-native-count{display:none!important}
     [data-gpr-list] .gpr-native-scroll{padding-bottom:max(24px,env(safe-area-inset-bottom))!important;min-height:0}
     .gpr-panel{color:#151519;padding:2px 0 16px;line-height:1.25}
-    .gpr-panel button,.gpr-editor button{font-family:inherit;cursor:pointer;border:0}
-    .gpr-panel button:focus-visible,.gpr-editor button:focus-visible{outline:2px solid #007aff;outline-offset:-3px}
+    .gpr-panel button,.gpr-editor button,.gpr-reminder-bar button,.gpr-home-actions button{font-family:inherit;cursor:pointer;border:0}
+    .gpr-panel button:focus-visible,.gpr-editor button:focus-visible,.gpr-reminder-bar button:focus-visible,.gpr-home-actions button:focus-visible{outline:2px solid #007aff;outline-offset:-3px}
+    .gpr-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;clip-path:inset(50%);overflow:hidden;white-space:nowrap}
     .gpr-title{font-size:34px;font-weight:750;letter-spacing:-.035em;line-height:1.13;margin:3px 0 17px}
     .gpr-back{padding:7px 12px;margin:4px 0 12px;border-radius:999px;background:#f2f2f7;color:#0068db;font-size:15px}
-    .gpr-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-    .gpr-tile{background:#fff;border-radius:16px;text-align:left;display:grid;grid-template-columns:1fr auto;gap:7px;align-items:center;padding:11px 13px;min-height:78px;color:#151519}
-    .gpr-tile[aria-pressed=true],.gpr-category[aria-pressed=true]{background:#e8f3ff;box-shadow:inset 0 0 0 1px #007aff44}
-    .gpr-tile:last-child{grid-column:span 2;min-height:54px;grid-template-columns:auto 1fr auto}
-    .gpr-tile:last-child .gpr-count{grid-column:3;grid-row:1}
-    .gpr-tile:last-child .gpr-tile-name{grid-column:2;grid-row:1}
-    .gpr-count{font-size:23px;font-weight:720;line-height:1}
-    .gpr-tile-name{font-size:15px;color:#48484c;font-weight:650}
+    .gpr-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:5px}
+    .gpr-tile{background:radial-gradient(ellipse at 20% 20%,#fff3,transparent 72%),var(--gpr-tile-color);border-radius:16px;text-align:left;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto 1fr;gap:4px;align-items:start;padding:10px 11px 9px;min-height:73px;color:#fff;box-shadow:inset 0 1px 0 #ffffff32}
+    .gpr-tile:active{filter:brightness(.93)}
+    .gpr-tile[data-tile="today"]{--gpr-tile-color:#459bd8}
+    .gpr-tile[data-tile="scheduled"]{--gpr-tile-color:#e37477}
+    .gpr-tile[data-tile="all"]{--gpr-tile-color:#373739}
+    .gpr-tile[data-tile="flagged"]{--gpr-tile-color:#eaa76a}
+    .gpr-tile[data-tile="urgent"]{--gpr-tile-color:#e46c95}
+    .gpr-tile[data-tile="done"]{--gpr-tile-color:#838d96}
+    .gpr-count{font-size:26px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+    .gpr-tile-name{grid-row:2;grid-column:1/-1;align-self:end;font-size:15px;color:#fff;font-weight:600}
     .gpr-badge{border-radius:50%;width:28px;height:28px;display:inline-grid;place-items:center;color:white;flex:none}
     .gpr-badge svg{width:16px;height:16px}
-    .gpr-subtitle{margin:22px 0 8px;font-size:23px;font-weight:750;letter-spacing:-.025em}
+    .gpr-tile .gpr-badge,.gpr-home-actions .gpr-badge{background:none!important;color:inherit}
+    .gpr-tile .gpr-badge svg{width:27px;height:27px}
+    .gpr-subtitle{margin:24px 0 10px;padding-inline:17px;font-size:21px;font-weight:750;letter-spacing:-.025em}
     .gpr-box{border-radius:16px;background:#fff;overflow:hidden}
-    .gpr-category{display:flex;gap:10px;align-items:center;width:100%;min-height:44px;padding:6px 12px;background:#fff;text-align:left;font-size:16px;color:#161617}
-    .gpr-category+.gpr-category,.gpr-item+.gpr-item{border-top:1px solid #ececf0}
-    .gpr-category-count{margin-left:auto;color:#63636d;font-size:14px}
+    .gpr-lists{border-radius:23px}
+    .gpr-category{position:relative;display:flex;gap:12px;align-items:center;width:100%;min-height:55px;padding:7px 17px;background:#fff;text-align:left;font-size:16px;color:#161617}
+    .gpr-category+.gpr-category::before{content:"";position:absolute;top:0;left:57px;right:17px;border-top:1px solid #ececf0}
+    .gpr-item+.gpr-item{border-top:1px solid #ececf0}
+    .gpr-category-count{margin-left:auto;color:#77777e;font-size:15px}
+    .gpr-category-chevron{color:#aaaab0;font-size:21px;line-height:1}
     .gpr-caption{margin:0 0 8px;color:#666671;font-size:13px}
     .gpr-row-group{font-size:15px;font-weight:700;margin:14px 0 6px}
     .gpr-item{display:flex;align-items:flex-start;gap:5px;padding:2px 6px;min-width:0}
@@ -289,7 +307,12 @@ Content:
     .gpr-actions button{border-radius:999px;font-size:16px;padding:10px 18px;background:#eeeef4;color:#0068db}
     .gpr-actions button:last-child{background:#007aff;color:white}
     .gpr-reminder{padding-top:6px}
-    .gpr-reminder-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:8px}
+    .gpr-reminder-bar,.gpr-home-actions{display:none}
+    [data-gpr-list="reminder"]>.sticky>.gpr-reminder-bar{width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px}
+    [data-gpr-list="reminder"]>.sticky>.gpr-reminder-bar button{background:#f2f2f7!important;color:#0068db!important;min-height:44px}
+    [data-gpr-list="home"]>.sticky>.gpr-home-actions{display:flex;align-items:center;margin-left:auto;border-radius:999px;border:1px solid #dedee3;background:#ffffff8c;box-shadow:inset 0 1px 0 #fff}
+    [data-gpr-list="home"]>.sticky>.gpr-home-actions button{background:transparent!important;display:grid;place-items:center;padding:0;min-width:46px;min-height:40px}
+    .gpr-home-actions .gpr-badge svg{width:22px;height:22px}
     .gpr-reminder-bar button,.gpr-original{padding:9px 13px;border-radius:999px;background:#f2f2f7;color:#0068db;font-size:15px}
     .gpr-reminder h1{margin-bottom:12px;overflow-wrap:anywhere}
     .gpr-reminder h2{font-size:16px;font-weight:650;margin:0 0 10px}
@@ -353,7 +376,10 @@ Content:
     const urgent = el('input');
     urgent.type = 'checkbox';
     urgent.checked = Boolean(meta.urgent);
-    for (const [label, control] of [['清单', list], ['计划日期', date], ['计划时间', time], ['标为紧急', urgent]]) {
+    const flagged = el('input');
+    flagged.type = 'checkbox';
+    flagged.checked = Boolean(meta.flagged);
+    for (const [label, control] of [['清单', list], ['计划日期', date], ['计划时间', time], ['添加旗标', flagged], ['标为紧急', urgent]]) {
       const field = el('label', '', label);
       field.append(control);
       sheet.append(field);
@@ -369,7 +395,7 @@ Content:
     sheet.onsubmit = event => {
       event.preventDefault();
       try {
-        saveItem(item, { list: list.value, due: date.value, time: date.value ? time.value : '', urgent: urgent.checked });
+        saveItem(item, { list: list.value, due: date.value, time: date.value ? time.value : '', urgent: urgent.checked, flagged: flagged.checked });
         close();
         save();
       } catch {
@@ -402,7 +428,6 @@ Content:
     const refresh = () => render(view);
     const [, category, color] = lists.find(([key]) => key === meta.list) || lists.at(-1);
     const page = el('section', 'gpr-reminder');
-    const toolbar = el('div', 'gpr-reminder-bar');
     const back = button('‹ ' + ([...types, ...lists].find(([key]) => key === view.filter)?.[1] || '提醒事项'), '', () => {
       view.detail = null;
       refresh();
@@ -410,10 +435,10 @@ Content:
     });
     const settings = button('事项设置', '', () => editor(view.root, item, meta, refresh));
     settings.disabled = !item.id;
-    toolbar.append(back, settings);
+    view.toolbar.replaceChildren(back, settings);
     const title = el('h1', 'gpr-title', item.title);
     title.style.color = color;
-    page.append(toolbar, title, el('p', 'gpr-caption', [category, meta.urgent && '紧急'].filter(Boolean).join(' · ')));
+    page.append(title, el('p', 'gpr-caption', [category, meta.flagged && '旗标', meta.urgent && '紧急'].filter(Boolean).join(' · ')));
     const todo = el('section', 'gpr-box');
     todo.append(el('h2', '', '待办事项'));
     const addLine = (label, done, action) => {
@@ -455,12 +480,13 @@ Content:
     }
     const today = localDate();
     function includes(item, filter) {
-      const { done, due, urgent, list = 'inbox' } = item.meta;
+      const { done, due, urgent, flagged, list = 'inbox' } = item.meta;
       if (filter === 'all') return !done;
       if (filter === 'done') return Boolean(done);
       if (done) return false;
       if (filter === 'today') return due === today;
       if (filter === 'scheduled') return Boolean(due);
+      if (filter === 'flagged') return Boolean(flagged);
       if (filter === 'urgent') return Boolean(urgent);
       return list === filter;
     }
@@ -469,19 +495,24 @@ Content:
       render(view);
       view.scroll.scrollTop = 0;
     };
-    const heading = el('h1', 'gpr-title', '提醒事项');
+    const heading = el('h1', 'gpr-sr-only', '提醒事项');
     const grid = el('div', 'gpr-grid');
     for (const [key, label, color, icon] of types) {
       const tile = button(undefined, 'gpr-tile', () => select(key));
+      tile.dataset.tile = key;
       tile.setAttribute('aria-pressed', String(view.filter === key));
-      tile.append(badge(color, icon), el('strong', 'gpr-count', items.filter(item => includes(item, key)).length), el('span', 'gpr-tile-name', label));
+      tile.append(badge(color, icon));
+      if (key !== 'done') tile.append(el('strong', 'gpr-count', items.filter(item => includes(item, key)).length));
+      tile.append(el('span', 'gpr-tile-name', label));
       grid.append(tile);
     }
-    const categories = el('div', 'gpr-box');
+    const categories = el('div', 'gpr-box gpr-lists');
     for (const [key, label, color, icon] of lists) {
       const category = button(undefined, 'gpr-category', () => select(key));
       category.setAttribute('aria-pressed', String(view.filter === key));
-      category.append(badge(color, icon), el('span', '', label), el('span', 'gpr-category-count', items.filter(item => includes(item, key)).length + ' ›'));
+      const chevron = el('span', 'gpr-category-chevron', '›');
+      chevron.setAttribute('aria-hidden', 'true');
+      category.append(badge(color, icon), el('span', '', label), el('span', 'gpr-category-count', items.filter(item => includes(item, key)).length), chevron);
       categories.append(category);
     }
     const result = el('section');
@@ -519,12 +550,12 @@ Content:
           view.scroll.scrollTop = 0;
         });
         open.append(el('span', 'gpr-item-title', item.title));
-        const summary = [item.meta.due && ['计划', item.meta.due, item.meta.time].filter(Boolean).join(' '), item.meta.urgent && '紧急'].filter(Boolean);
+        const summary = [item.meta.due && ['计划', item.meta.due, item.meta.time].filter(Boolean).join(' '), item.meta.flagged && '旗标', item.meta.urgent && '紧急'].filter(Boolean);
         if (summary.length) open.append(el('span', 'gpr-item-meta', summary.join(' · ')));
         if (item.notes) open.append(el('span', 'gpr-preview', plain(item.notes)));
         const info = button('ⓘ', 'gpr-info', () => editor(root, item, item.meta, () => render(view)));
         info.disabled = !item.id;
-        info.setAttribute('aria-label', '设置清单、日期和紧急程度');
+        info.setAttribute('aria-label', '设置清单、日期、旗标和紧急程度');
         row.append(toggle, open, info);
         box.append(row);
       }
@@ -534,17 +565,46 @@ Content:
     if (view.filter) {
       panel.replaceChildren(button('‹ 所有清单', 'gpr-back', () => select(null)), result);
     } else {
-      panel.replaceChildren(heading, grid, el('h2', 'gpr-subtitle', '我的清单'), categories);
+      panel.replaceChildren(heading, grid, el('h2', 'gpr-subtitle', '我的列表'), categories);
       if (root.querySelector('input[placeholder="搜索"]')?.value.trim()) panel.append(result);
     }
   }
   function updateList(root) {
     const scroll = [...root.children].find(node => node.classList.contains('overflow-y-auto'));
     const search = root.querySelector('input[placeholder="搜索"]');
-    if (!scroll || !search) return;
+    const header = root.querySelector(':scope > .sticky');
+    if (!scroll || !search || !header) return;
     let view = state.get(root);
-    if (!view || view.scroll !== scroll) {
+    if (!view || view.scroll !== scroll || view.header !== header) {
+      view?.panel.remove();
+      view?.toolbar.remove();
+      view?.homeActions.remove();
       const panel = el('div', 'gpr-panel');
+      const toolbar = el('div', 'gpr-reminder-bar');
+      const homeActions = el('div', 'gpr-home-actions');
+      const nativeMenu = [...header.querySelectorAll('button')].at(-1);
+      if (nativeMenu) {
+        nativeMenu.classList.add('gpr-native-menu');
+        const menu = button(undefined, '', () => nativeMenu.click());
+        menu.setAttribute('aria-label', '菜单');
+        menu.append(badge('', 'more'));
+        homeActions.append(menu);
+      }
+      const searchButton = button(undefined, '', () => {
+        const open = root.toggleAttribute('data-gpr-search-open');
+        searchButton.setAttribute('aria-expanded', String(open));
+        if (open) {
+          search.focus();
+        } else if (search.value) {
+          search.value = '';
+          search.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+      searchButton.setAttribute('aria-label', '搜索');
+      searchButton.setAttribute('aria-expanded', String(root.hasAttribute('data-gpr-search-open')));
+      searchButton.append(badge('', 'search'));
+      homeActions.append(searchButton);
+      header.append(toolbar, homeActions);
       root.dataset.gprList = '';
       search.parentElement?.parentElement?.classList.add('gpr-search');
       scroll.classList.add('gpr-native-scroll');
@@ -552,7 +612,7 @@ Content:
         if (node !== scroll && /^\s*\d+\s*个备忘录\s*$/.test(node.textContent)) node.classList.add('gpr-native-count');
       }
       scroll.prepend(panel);
-      view = { root, scroll, panel, rows: [], ids: new Map(), filter: null, keys: null };
+      view = { root, header, toolbar, homeActions, scroll, panel, rows: [], ids: new Map(), filter: null, keys: null };
       state.set(root, view);
     }
     const rows = readRows(scroll);
@@ -629,10 +689,11 @@ Content:
       if (window.fetch === fetchWithReminders) window.fetch = nativeFetch;
       if (frame !== null) cancelAnimationFrame(frame);
       style.remove();
-      document.querySelectorAll('.gpr-panel,.gpr-detail-title,.gpr-overlay').forEach(node => node.remove());
+      document.querySelectorAll('.gpr-panel,.gpr-detail-title,.gpr-overlay,.gpr-reminder-bar,.gpr-home-actions').forEach(node => node.remove());
       document.querySelectorAll('[data-gpr-list],[data-gpr-detail]').forEach(root => {
         delete root.dataset.gprList;
         delete root.dataset.gprDetail;
+        delete root.dataset.gprSearchOpen;
       });
       document.querySelectorAll('.gpr-check-icon').forEach(icon => {
         icon.removeAttribute('role');
@@ -641,6 +702,6 @@ Content:
       state.clear();
     }
   };
-  window.RochePlugin.register({ id, name: 'TA 手机 · 提醒事项', version: '1.1.0', apps: [] });
+  window.RochePlugin.register({ id, name: 'TA 手机 · 提醒事项', version: '1.2.0', apps: [] });
   schedule();
 })();
