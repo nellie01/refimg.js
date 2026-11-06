@@ -1,4 +1,4 @@
-/* GPhone · TA 手机提醒事项 v1.0.0 */
+/* GPhone · TA 手机提醒事项 v1.1.0 */
 (() => {
   'use strict';
   if (!window.RochePlugin?.register) return;
@@ -28,6 +28,57 @@
     bag: '<rect x="4" y="8" width="16" height="13" rx="3"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/>'
   };
   window.GPhoneTAReminders?.stop();
+  const nativeFetch = window.fetch;
+  let intercepting = true;
+  function remindersPrompt(prompt) {
+    if (typeof prompt !== 'string' || !/^你正在模拟角色 "[^\n]+" 生成手机备忘录。/.test(prompt)
+      || !prompt.includes('条**近期**的备忘录/待办事项。')
+      || !prompt.includes('[[MEMO_START]]') || !prompt.includes('[[MEMO_END]]')) return prompt;
+    const goal = prompt.lastIndexOf('\n【任务目标】\n');
+    if (goal < 0) return prompt;
+    return prompt.slice(0, goal) + `
+
+【任务目标】
+遵守上文指定的数量。每条只写一件实际可执行或已完成的提醒事项，按角色语言和人设写。标题用简短的行动句。长篇叙述、内心独白和日记体改为一两句必要的备注。不同的事分开写。
+保留以下格式，Content 的第一行必须是机器可读的单行 JSON 标记。list 只能用 work（工作）、shopping（日常采购）、life（生活）、inbox（确实无法归类）。due 是任务到期日 YYYY-MM-DD，按角色时区计算，可为未来日期，无明确日期写空字符串。time 是明确时间 HH:MM，无则写空字符串。仅明确紧急才用 urgent:true，仅确定已完成才用 done:true。
+Date 是记录日期，使用角色的今天或过去一周中的实际记录日期。不要把 Date 和 due 混用。
+
+[[MEMO_START]]
+Date: YYYY-MM-DD
+Title: 简短的行动标题
+Content:
+@gphone-reminder {"list":"life","due":"","time":"","urgent":false,"done":false}
+一两句必要备注，没备注可省略。仅有真正的子步骤时才用 - [ ] 或 - [x]。
+[[MEMO_END]]
+
+直接输出这些区块，不加代码围栏。`;
+  }
+  function fetchWithReminders(input, init) {
+    if (intercepting && typeof init?.body === 'string' && init.body.includes('[[MEMO_START]]')) {
+      try {
+        const payload = JSON.parse(init.body);
+        const proxied = payload.bodyEncoding === 'text' && typeof payload.url === 'string' && typeof payload.body === 'string';
+        const body = proxied ? JSON.parse(payload.body) : payload;
+        const slots = [
+          [body, 'system'],
+          ...(Array.isArray(body.messages) ? body.messages.filter(message => message?.role === 'system').map(message => [message, 'content']) : []),
+          ...(Array.isArray(body.system_instruction?.parts) ? body.system_instruction.parts.map(part => [part, 'text']) : [])
+        ];
+        let changed = false;
+        for (const [node, key] of slots) {
+          const prompt = remindersPrompt(node?.[key]);
+          if (prompt === node?.[key]) continue;
+          node[key] = prompt;
+          changed = true;
+        }
+        if (changed) init = { ...init, body: JSON.stringify(proxied ? { ...payload, body: JSON.stringify(body) } : body) };
+      } catch {
+        // Leave unrelated or unrecognized requests intact.
+      }
+    }
+    return nativeFetch.call(this, input, init);
+  }
+  window.fetch = fetchWithReminders;
   const el = (tag, className, value) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -64,6 +115,90 @@
     localStorage.setItem(storageKey, JSON.stringify(saved));
   }
   const recordKey = (title, date, content) => JSON.stringify([title.trim(), date.trim(), content.trim()]);
+  const validDate = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return '';
+    const date = new Date(value + 'T12:00:00');
+    return localDate(date) === value ? value : '';
+  };
+  const validTime = value => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : '';
+  const plain = text => text.replace(/\*\*|__|`/g, '').trim();
+  function inferList(text) {
+    if (/\b(?:buy|buying|grocer\w*|supermarket|shopping|ordered|reorder|order confirmation|shopping list)\b|采购|购物|超市|下单|买(?:了|菜|药|花|牛奶|东西)/iu.test(text)) return 'shopping';
+    if (/\b(?:office|meeting|rota|roster|deployment|workplace|colleague|briefing|deadline|report|shift)\b|工作|会议|同事|排班|纪要|项目|上班/iu.test(text)) return 'work';
+    if (/\b(?:appointment|hair|haircut|shelf|home|valet|family|dinner|house|doctor|gym|laundry|dentist)\b|生活|家里|回家|聚餐|理发|染发|看病|取车|锻炼/iu.test(text)) return 'life';
+    return 'inbox';
+  }
+  function inferDue(text, base) {
+    const explicit = text.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0];
+    if (explicit) return validDate(explicit);
+    const offset = /\bday after tomorrow\b|后天/iu.test(text) ? 2
+      : /\btomorrow\b|明天/iu.test(text) ? 1 : /\btoday\b|今天|今晚/iu.test(text) ? 0 : null;
+    if (offset === null || !validDate(base)) return '';
+    const date = new Date(base + 'T12:00:00');
+    date.setDate(date.getDate() + offset);
+    return localDate(date);
+  }
+  function inferTime(text) {
+    const clock = text.match(/(?:\b(?:at|before|by)\s+|[到前]\s*)([01]\d|2[0-3]):?([0-5]\d)\b/iu);
+    return clock ? clock[1] + ':' + clock[2] : '';
+  }
+  function parseReminder(row) {
+    let format = null;
+    const steps = [];
+    const notes = [];
+    const lines = row.content.replace(/\r\n?/g, '\n').split('\n');
+    const marker = lines[0]?.trim().match(/^@gphone-reminder\s+(\{.*\})$/i);
+    if (marker) {
+      try {
+        const data = JSON.parse(marker[1]);
+        if (lists.some(([key]) => key === data.list)) {
+          format = { list: data.list, due: validDate(data.due), time: validTime(data.time), urgent: data.urgent === true, done: data.done === true };
+          lines.shift();
+        }
+      } catch {}
+    }
+    for (const line of lines) {
+      const check = line.match(/^\s*(?:[-*+]\s+)?\[([ xX~])\]\s+(.+)/);
+      if (check) {
+        if (check[1] !== '~') steps.push({ title: plain(check[2]), done: check[1].toLowerCase() === 'x' });
+      } else {
+        notes.push(line);
+      }
+    }
+    return { format, steps: steps.filter(step => step.title), notes: notes.join('\n').trim() };
+  }
+  function reminderItems(row, recordId, metadata) {
+    const saved = recordId && Object.hasOwn(metadata, recordId) ? metadata[recordId] || {} : {};
+    const { format, steps, notes } = parseReminder(row);
+    const children = !format && steps.length > 1;
+    return (format || !steps.length ? [null] : steps).map((step, index) => {
+      const originalTitle = plain(row.title);
+      const vagueTitle = /^(?:owed|todo|to do|note|notes|content|tomorrow|today|提醒|待办|明天|今天)\s*[:：]?$/iu.test(originalTitle);
+      const firstSentence = plain(notes).match(/^[^\n.!?。！？]+/)?.[0];
+      const title = step?.title || (vagueTitle && !format && firstSentence?.length <= 100 ? firstSentence : originalTitle) || '提醒事项';
+      const taskKey = children ? JSON.stringify([index, title]) : null;
+      const task = taskKey ? saved.tasks?.[taskKey] : saved;
+      const context = plain(row.title) + '\n' + notes;
+      const list = inferList(title);
+      const time = format ? format.time : inferTime(title);
+      const meta = format || {
+        list: list !== 'inbox' ? list : inferList(context),
+        due: inferDue(title, row.date) || inferDue(context.slice(0, 220), row.date),
+        time,
+        urgent: /^(?:urgent\b|紧急)|\b(?:asap|urgent)\b|尽快/iu.test(title),
+        done: step ? step.done : /(?:[—–-]\s*|\[)done\]?\s*$|[（(]已完成[）)]$/iu.test(title)
+      };
+      return { ...row, id: recordId, taskKey, title, notes,
+        steps: format ? steps : [], meta: { ...meta, ...saved, ...task } };
+    });
+  }
+  function saveItem(item, changes) {
+    const saved = readMeta()[item.id] || {};
+    const next = item.taskKey
+      ? { ...saved, tasks: { ...saved.tasks, [item.taskKey]: { ...saved.tasks?.[item.taskKey], ...changes } } }
+      : { ...saved, ...changes };
+    writeMeta(item.id, next);
+  }
   // Match the native rows to persistent IDs. An ambiguous match stays read-only.
   function matchRecords(rows) {
     if (!rows.length) return Promise.resolve(new Map());
@@ -102,6 +237,8 @@
     [data-gpr-list]{background:#f2f2f7!important;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif!important}
     [data-gpr-list]>.sticky,[data-gpr-list]>.gpr-search{background:#f2f2f7!important}
     [data-gpr-list="category"],[data-gpr-list="category"]>.sticky,[data-gpr-list="category"]>.gpr-search{background:#fff!important}
+    [data-gpr-list="reminder"],[data-gpr-list="reminder"]>.sticky{background:#fff!important}
+    [data-gpr-list="reminder"]>.sticky,[data-gpr-list="reminder"]>.gpr-search{display:none!important}
     [data-gpr-list]>.sticky .tracking-widest{opacity:0}
     [data-gpr-list]>.sticky button,[data-gpr-detail]>.gpr-detail-bar button{border-radius:999px;background:#fff!important;color:#17171b!important;min-width:42px;min-height:40px}
     [data-gpr-list]>.sticky button .material-symbols-outlined{color:#17171b!important}
@@ -151,6 +288,17 @@
     .gpr-actions{display:flex;justify-content:space-between;margin-top:16px;gap:10px}
     .gpr-actions button{border-radius:999px;font-size:16px;padding:10px 18px;background:#eeeef4;color:#0068db}
     .gpr-actions button:last-child{background:#007aff;color:white}
+    .gpr-reminder{padding-top:6px}
+    .gpr-reminder-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:8px}
+    .gpr-reminder-bar button,.gpr-original{padding:9px 13px;border-radius:999px;background:#f2f2f7;color:#0068db;font-size:15px}
+    .gpr-reminder h1{margin-bottom:12px;overflow-wrap:anywhere}
+    .gpr-reminder h2{font-size:16px;font-weight:650;margin:0 0 10px}
+    .gpr-reminder .gpr-box{background:#f2f2f7;padding:13px 14px;margin:12px 0}
+    .gpr-reminder p{font-size:15px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+    .gpr-reminder .gpr-item{align-items:center;padding-left:0}
+    .gpr-reminder .gpr-item-title{padding:9px 0}
+    .gpr-reminder .gpr-caption{margin-top:14px}
+    .gpr-original{margin-top:14px}
     [data-gpr-detail]{background:white!important;color:#16161a!important}
     [data-gpr-detail] .gpr-detail-scroll{padding-inline:18px!important;padding-top:12px!important;min-width:0}
     [data-gpr-detail] .gpr-detail-date{text-align:left!important;margin-bottom:8px!important}
@@ -199,10 +347,13 @@
     const date = el('input');
     date.type = 'date';
     date.value = meta.due || '';
+    const time = el('input');
+    time.type = 'time';
+    time.value = meta.time || '';
     const urgent = el('input');
     urgent.type = 'checkbox';
     urgent.checked = Boolean(meta.urgent);
-    for (const [label, control] of [['清单', list], ['计划日期', date], ['标为紧急', urgent]]) {
+    for (const [label, control] of [['清单', list], ['计划日期', date], ['计划时间', time], ['标为紧急', urgent]]) {
       const field = el('label', '', label);
       field.append(control);
       sheet.append(field);
@@ -218,7 +369,7 @@
     sheet.onsubmit = event => {
       event.preventDefault();
       try {
-        writeMeta(item.id, { ...meta, list: list.value, due: date.value, urgent: urgent.checked });
+        saveItem(item, { list: list.value, due: date.value, time: date.value ? time.value : '', urgent: urgent.checked });
         close();
         save();
       } catch {
@@ -231,13 +382,77 @@
     root.append(overlay);
     list.focus();
   }
+  function toggleItem(item, changes, refresh) {
+    try {
+      saveItem(item, changes);
+      refresh();
+    } catch {
+      window.alert('本机存储不可用，状态未保存。');
+    }
+  }
+  function completionButton(done, recordId, action) {
+    const toggle = button(undefined, 'gpr-ring', action);
+    toggle.disabled = !recordId;
+    toggle.setAttribute('aria-pressed', String(Boolean(done)));
+    toggle.setAttribute('aria-label', done ? '恢复为待办' : '标为完成');
+    return toggle;
+  }
+  function detail(view, item) {
+    const { meta } = item;
+    const refresh = () => render(view);
+    const [, category, color] = lists.find(([key]) => key === meta.list) || lists.at(-1);
+    const page = el('section', 'gpr-reminder');
+    const toolbar = el('div', 'gpr-reminder-bar');
+    const back = button('‹ ' + ([...types, ...lists].find(([key]) => key === view.filter)?.[1] || '提醒事项'), '', () => {
+      view.detail = null;
+      refresh();
+      view.scroll.scrollTop = view.previousScroll || 0;
+    });
+    const settings = button('事项设置', '', () => editor(view.root, item, meta, refresh));
+    settings.disabled = !item.id;
+    toolbar.append(back, settings);
+    const title = el('h1', 'gpr-title', item.title);
+    title.style.color = color;
+    page.append(toolbar, title, el('p', 'gpr-caption', [category, meta.urgent && '紧急'].filter(Boolean).join(' · ')));
+    const todo = el('section', 'gpr-box');
+    todo.append(el('h2', '', '待办事项'));
+    const addLine = (label, done, action) => {
+      const row = el('div', 'gpr-item');
+      if (done) row.dataset.done = '';
+      row.append(completionButton(done, item.id, action), el('span', 'gpr-item-title', label));
+      todo.append(row);
+    };
+    addLine(meta.done ? '已完成' : '标为完成', meta.done, () => toggleItem(item, { done: !meta.done }, refresh));
+    for (const [index, step] of item.steps.entries()) {
+      const key = JSON.stringify([index, step.title]);
+      const done = meta.steps?.[key] ?? step.done;
+      addLine(step.title, done, () => toggleItem(item, { steps: { ...meta.steps, [key]: !done } }, refresh));
+    }
+    page.append(todo);
+    const scheduleBox = el('section', 'gpr-box');
+    scheduleBox.append(el('h2', '', '计划'), el('p', '', meta.due ? [meta.due, meta.time].filter(Boolean).join(' ') : '未设日期'));
+    page.append(scheduleBox);
+    if (item.notes) {
+      const notes = el('section', 'gpr-box');
+      notes.append(el('h2', '', '备注'), el('p', '', plain(item.notes).replace(/^>\s*/gm, '')));
+      page.append(notes);
+    }
+    page.append(button('查看原备忘录', 'gpr-original', () => item.row.click()));
+    view.root.dataset.gprList = 'reminder';
+    view.panel.replaceChildren(page);
+  }
   function render(view) {
     const { root, panel, rows, ids } = view;
     const metadata = readMeta();
-    const items = rows.map(row => {
-      const recordId = ids.get(row.key);
-      return { ...row, id: recordId, meta: recordId && Object.hasOwn(metadata, recordId) ? metadata[recordId] || {} : {} };
-    });
+    const items = rows.flatMap(row => reminderItems(row, ids.get(row.key), metadata));
+    if (view.detail) {
+      const item = items.find(item => item.key === view.detail.key && item.taskKey === view.detail.taskKey);
+      if (item) {
+        detail(view, item);
+        return;
+      }
+      view.detail = null;
+    }
     const today = localDate();
     function includes(item, filter) {
       const { done, due, urgent, list = 'inbox' } = item.meta;
@@ -296,20 +511,17 @@
       for (const item of groups.get(key)) {
         const row = el('div', 'gpr-item');
         if (item.meta.done) row.dataset.done = '';
-        const toggle = button(undefined, 'gpr-ring', () => {
-          try {
-            writeMeta(item.id, { ...item.meta, done: !item.meta.done });
-            render(view);
-          } catch { window.alert('本机存储不可用，状态未保存。'); }
+        const toggle = completionButton(item.meta.done, item.id, () => toggleItem(item, { done: !item.meta.done }, () => render(view)));
+        const open = button(undefined, 'gpr-open', () => {
+          view.detail = { key: item.key, taskKey: item.taskKey };
+          view.previousScroll = view.scroll.scrollTop;
+          render(view);
+          view.scroll.scrollTop = 0;
         });
-        toggle.disabled = !item.id;
-        toggle.setAttribute('aria-pressed', String(Boolean(item.meta.done)));
-        toggle.setAttribute('aria-label', item.meta.done ? '恢复为待办' : '标为完成');
-        const open = button(undefined, 'gpr-open', () => item.row.click());
         open.append(el('span', 'gpr-item-title', item.title));
-        const summary = [item.meta.due && '计划 ' + item.meta.due, item.meta.urgent && '紧急'].filter(Boolean);
+        const summary = [item.meta.due && ['计划', item.meta.due, item.meta.time].filter(Boolean).join(' '), item.meta.urgent && '紧急'].filter(Boolean);
         if (summary.length) open.append(el('span', 'gpr-item-meta', summary.join(' · ')));
-        if (item.content.trim()) open.append(el('span', 'gpr-preview', item.content.replace(/\*\*/g, '')));
+        if (item.notes) open.append(el('span', 'gpr-preview', plain(item.notes)));
         const info = button('ⓘ', 'gpr-info', () => editor(root, item, item.meta, () => render(view)));
         info.disabled = !item.id;
         info.setAttribute('aria-label', '设置清单、日期和紧急程度');
@@ -411,8 +623,10 @@
   observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['disabled'] });
   window.GPhoneTAReminders = {
     stop() {
+      intercepting = false;
       observer.disconnect();
       document.removeEventListener('input', onSearch);
+      if (window.fetch === fetchWithReminders) window.fetch = nativeFetch;
       if (frame !== null) cancelAnimationFrame(frame);
       style.remove();
       document.querySelectorAll('.gpr-panel,.gpr-detail-title,.gpr-overlay').forEach(node => node.remove());
@@ -427,6 +641,6 @@
       state.clear();
     }
   };
-  window.RochePlugin.register({ id, name: 'TA 手机 · 提醒事项', version: '1.0.0', apps: [] });
+  window.RochePlugin.register({ id, name: 'TA 手机 · 提醒事项', version: '1.1.0', apps: [] });
   schedule();
 })();
