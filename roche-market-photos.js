@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.8.0
+/* Roche 商城 AI 商品图 v1.9.0
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.8.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.9.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -20,20 +20,20 @@
  const hostProgress={total:0,uploaded:0,failed:0,skipped:0};let hostProblems=[];
  const stamp=p=>p.source==='preset'?'preset:'+p.presetId:p.source==='custom'?'custom:'+p.endpoint+'|'+p.model:'system';
  let catalog=[],cartCatalog=[],categoryDefs=[],queueScope=null;const legacyKeys=new Map(),categoryEntries=new Map();
- const rowKey=p=>JSON.stringify(['product',p._kind||'market',String(p._categoryId||p.categoryId||'uncategorized'),String(p.id||normal(p.title))]);
+ const rowKey=p=>p._phoneKey||JSON.stringify(['product',p._kind||'market',String(p._categoryId||p.categoryId||'uncategorized'),String(p.id||normal(p.title))]);
  const scopeKey=s=>s&&s.kind&&s.id?JSON.stringify([s.kind,String(s.id)]):'visible';
  function effectiveJob(r){const key=typeof r==='string'?r:r.key,legacy=typeof r==='string'?legacyKeys.get(key):r.legacyKey||legacyKeys.get(key),current=jobs.get(key),old=legacy?jobs.get(legacy):null;return current?{...current,hasImage:!!(current.hasImage||old?.hasImage)}:old;}
  function cartTitle(card){const heading=card.querySelector('h3,h1');return heading?normal(heading.textContent):normal(card.querySelector('span.text-gray-600.flex-grow.truncate')?.textContent).replace(/\s+x\d+$/,'');}
  function cartSeller(card){const row=card.closest('div.group[data-v-a79dfc6a]');return row?normal(row.parentElement?.querySelector('div.font-bold.text-black.text-sm')?.textContent):'';}
- function indexCatalog(rows,categories,carts=[]){categoryDefs=categories;catalog=rows.filter(p=>normal(p.title)).map(p=>{const key=rowKey(p),title=normal(p.title);legacyKeys.set(key,title);return {key,title,legacyKey:title,id:p.id,kind:p._kind,categoryId:String(p._categoryId||''),category:p._category||'',seller:normal(p.seller)};});
+ function indexCatalog(rows,categories,carts=[]){categoryDefs=categories;catalog=rows.filter(p=>normal(p.title)).map(p=>{const key=rowKey(p),title=normal(p.title);if(p._kind!=='phone')legacyKeys.set(key,title);return {key,title,legacyKey:p._kind==='phone'?undefined:title,id:p.id,kind:p._kind,categoryId:String(p._categoryId||''),category:p._category||'',seller:normal(p.seller),product:p};});
   const available=new Map();for(const item of carts){if(item.type==='ticket'||!normal(item.title))continue;const title=normal(item.title),id=String(item.id??''),categoryId=String(item.categoryId||item.category?.id||''),kind=item.type==='eats'||item.category?.type==='eats'?'eats':null;let matches=catalog.filter(p=>String(p.id)===id&&p.title===title&&(!kind||p.kind===kind)&&(!categoryId||p.categoryId===categoryId));
    if(!matches.length)for(const job of jobs.values()){if(normal(job.title)!==title)continue;let parts;try{parts=JSON.parse(job.key);}catch{continue;}if(Array.isArray(parts)&&parts[0]==='product'&&String(parts[3])===id&&(!kind||parts[1]===kind)&&(!categoryId||String(parts[2])===categoryId))matches.push({key:job.key,title,legacyKey:title,id:item.id,kind:parts[1],categoryId:String(parts[2]),seller:normal(item.seller)});}
    for(const p of matches){legacyKeys.set(p.key,title);available.set(p.key,{...p,seller:normal(item.seller)||p.seller});}
   }cartCatalog=[...available.values()];for(const r of records){bindRecord(r);if(ready)paint(r).catch(()=>{});}
  }
  function currentCategory(){const food=!!document.querySelector('.market-app [data-v-c4c0c16f]'),kind=food?'eats':'market',bar=document.querySelector(food?'.market-app div[data-v-c4c0c16f].overflow-x-auto':'.market-app div[data-v-35c20c1f].overflow-x-auto');if(!bar)return null;let name='';if(food)name=normal(bar.querySelector('button.bg-black.text-white')?.textContent);else for(const span of bar.querySelectorAll('span.text-black'))if(span.parentElement?.querySelector('div.bg-black')){name=normal(span.textContent);break;}if(!name||name==='全部')return null;const matches=categoryDefs.filter(c=>c.kind===kind&&normal(c.name)===name);return matches.length===1?matches[0]:null;}
- function bindRecord(r){if(!r.img.isConnected)return;const title=(r.isCart?cartTitle(r.card):normal(r.card.querySelector('h3,h1')?.textContent))||r.title,kind=r.img.hasAttribute('data-v-c4c0c16f')||r.wrap.classList.contains('rmai-eats')?'eats':'market',active=r.isCart?null:currentCategory();r.title=title;let matches=r.isCart?cartCatalog.filter(p=>p.title===title):catalog.filter(p=>p.title===title&&p.kind===kind);if(r.isCart&&!matches.length)matches=catalog.filter(p=>p.title===title);if(active?.kind===kind)matches=matches.filter(p=>p.categoryId===String(active.id));if(matches.length>1){const seller=r.isCart?cartSeller(r.card):normal(r.card.textContent),sellerMatches=matches.filter(p=>p.seller&&(r.isCart?seller===p.seller:seller.includes(p.seller)));if(sellerMatches.length===1)matches=sellerMatches;}const p=matches.length===1?matches[0]:{key:title,legacyKey:title,kind,categoryId:''};if(r.key!==p.key){r.img.onload=r.img.onerror=null;r.wrap.classList.remove('rmai-ready');if(r.img.getAttribute('src')!==r.original)r.img.src=r.original;}r.key=p.key;r.legacyKey=p.legacyKey;r.kind=p.kind;r.categoryId=p.categoryId;r.img.alt=title+'（AI 生成示意图）';}
- function recordFor(p){return {key:rowKey(p),title:normal(p.title),legacyKey:normal(p.title),kind:p._kind,categoryId:String(p._categoryId||''),description:p.description,product:p};}
+ function bindRecord(r){if(r.isPhone){bindPhoneRecord(r);return;}if(!r.img.isConnected)return;const title=(r.isCart?cartTitle(r.card):normal(r.card.querySelector('h3,h1')?.textContent))||r.title,kind=r.img.hasAttribute('data-v-c4c0c16f')||r.wrap.classList.contains('rmai-eats')?'eats':'market',active=r.isCart?null:currentCategory();r.title=title;let matches=r.isCart?cartCatalog.filter(p=>p.title===title):catalog.filter(p=>p.title===title&&p.kind===kind);if(r.isCart&&!matches.length)matches=catalog.filter(p=>p.title===title&&p.kind!=='phone');if(active?.kind===kind)matches=matches.filter(p=>p.categoryId===String(active.id));if(matches.length>1){const seller=r.isCart?cartSeller(r.card):normal(r.card.textContent),sellerMatches=matches.filter(p=>p.seller&&(r.isCart?seller===p.seller:seller.includes(p.seller)));if(sellerMatches.length===1)matches=sellerMatches;}const p=matches.length===1?matches[0]:{key:title,legacyKey:title,kind,categoryId:''};if(r.key!==p.key){r.img.onload=r.img.onerror=null;r.wrap.classList.remove('rmai-ready');if(r.img.getAttribute('src')!==r.original)r.img.src=r.original;}r.key=p.key;r.legacyKey=p.legacyKey;r.kind=p.kind;r.categoryId=p.categoryId;r.img.alt=title+'（AI 生成示意图）';}
+ function recordFor(p){return {key:rowKey(p),title:normal(p.title),legacyKey:p._kind==='phone'?undefined:normal(p.title),kind:p._kind,categoryId:String(p._categoryId||''),description:p.description,product:p};}
  function categoryPlan(scope){const all=[...new Map(catalog.filter(p=>p.kind===scope.kind&&p.categoryId===String(scope.id)).map(p=>[p.key,{key:p.key,title:p.title,legacyKey:p.legacyKey,kind:p.kind,categoryId:p.categoryId}])).values()],available=r=>!pending.has(r.key)&&!['running','unknown'].includes(effectiveJob(r)?.status)&&activeTask?.key!==r.key,todo=all.filter(r=>available(r)&&!effectiveJob(r)?.hasImage),replace=all.filter(available);return {all,batch:all,todo,replace,saved:all.filter(r=>effectiveJob(r)?.hasImage).length,queued:all.filter(r=>pending.has(r.key)).length,running:all.filter(r=>effectiveJob(r)?.status==='running').length};}
  async function startCategory(scope,force=false){if(!ready||stopped)return;const requested={...scope};await productRows();if(stopped)return;const plan=categoryPlan(requested),chosen=force?plan.replace:plan.todo;if(!chosen.length){panelMessage='此类目没有可以'+(force?'重新生成':'补齐')+'的商品图片。';tool();return;}if(provider.source==='system'&&typeof api?.ai?.generateImage!=='function'){panelMessage='当前 Roche 没有系统生图接口。';tool();return;}const keys=new Set(plan.all.map(r=>r.key));let cancelled=0;for(const [key,task]of pending)if(!keys.has(key)&&!task.rec.isProbe){pending.delete(key);paintKey(key);cancelled++;}const rows=await productRows(),byKey=new Map(rows.map(p=>[rowKey(p),p]));if(stopped)return;queueScope=requested;batchPaused=false;panelMessage='仅'+(force?'重新生成':'补齐')+'「'+requested.name+'」：'+chosen.length+' 张。'+(cancelled?'已取消其他类目 '+cancelled+' 个尚未发出的任务。':'')+(activeTask&&!keys.has(activeTask.key)?'正在进行的图片会先完成。':'');for(const r of chosen){const p=byKey.get(r.key);if(p)enqueue(recordFor(p),'',false,force,true);}tool();pump();}
  function generationSettings(){let g={};try{g=JSON.parse(localStorage.getItem('noir_market_gen_settings'))||{};}catch{}const food=!!document.querySelector('.market-app [data-v-c4c0c16f]');if(food&&nativeEats.categoryCount)g=nativeEats;const categories=Math.max(1,Math.min(5,Math.floor(Number(g.categoryCount)||3))),items=Math.max(1,Math.min(10,Math.floor(Number(g.itemCount||g.itemPerCategoryCount)||5)));return {categories,items,total:categories*items,worldview:String(g.worldview||'')};}
@@ -70,10 +70,11 @@
  async function productRows(){return new Promise(resolve=>{
   let done=false,d;const finish=rows=>{if(done)return;done=true;clearTimeout(timer);d?.close();resolve(rows);},timer=setTimeout(()=>finish([]),5000);
   try{const r=indexedDB.open('Roche_db');r.onupgradeneeded=()=>{r.transaction.abort();finish([]);};r.onerror=r.onblocked=()=>finish([]);r.onsuccess=()=>{
-   d=r.result;if(done){d.close();return;}const stores=['market_products','market_categories','market_eats_categories','market_preferences','market_carts'].filter(s=>d.objectStoreNames.contains(s));if(!stores.length)return finish([]);
+   d=r.result;if(done){d.close();return;}const stores=['market_products','market_categories','market_eats_categories','market_preferences','market_carts','financial_profiles'].filter(s=>d.objectStoreNames.contains(s));if(!stores.length)return finish([]);
    const t=d.transaction(stores,'readonly'),rows=[],cartItems=[],cats=new Map(),definitions=[];
    for(const store of stores){const q=t.objectStore(store).getAll();q.onsuccess=()=>{for(const p of q.result||[]){
-    if(store==='market_carts'){for(const item of p.items||[])cartItems.push(item);}
+    if(store==='financial_profiles'){rows.push(...phoneProducts(p));}
+    else if(store==='market_carts'){for(const item of p.items||[])cartItems.push(item);}
     else if(store==='market_categories'){cats.set(p.id,p);if(p.id!=='cat_all')definitions.push({kind:'market',id:String(p.id),name:normal(p.name)});}
     else if(store==='market_preferences'){if(p.id!=='tickets_config'&&p.categoryCount&&p.itemPerCategoryCount)nativeEats=p;}
     else if(store==='market_eats_categories'){definitions.push({kind:'eats',id:String(p.id),name:normal(p.name)});for(const item of p.items||[])rows.push({...item,_kind:'eats',_categoryId:String(p.id),_category:p.name,_worldview:p.worldview||''});}
@@ -265,9 +266,132 @@
 
  const kinds=[[/榴莲|durian/i,'durian dessert'],[/冰淇淋|冰激凌|冰酪|gelato/i,'ice cream dessert'],[/糯米.*芒果|mango sticky/i,'mango sticky rice'],[/蛋糕|提拉米苏|cake|tiramisu/i,'cake dessert'],[/披萨|pizza/i,'pizza'],[/汉堡|burger/i,'burger'],[/寿司|sushi/i,'sushi'],[/面|ramen|pasta/i,'noodle or pasta dish'],[/牛排|steak/i,'steak dish'],[/奶茶|咖啡|coffee|tea/i,'drink'],[/洗发|shampoo/i,'shampoo bottle'],[/沐浴|body wash/i,'body wash bottle'],[/香水|perfume/i,'perfume bottle'],[/牙膏|toothpaste/i,'toothpaste tube'],[/护肤|精华|skincare/i,'skincare cosmetic'],[/音响|音箱|speaker|olufsen/i,'audio speaker'],[/耳机|headphone|airpod/i,'headphones'],[/switch/i,'Nintendo Switch accessory'],[/手机|iphone|smartphone/i,'smartphone'],[/电脑|laptop|macbook/i,'laptop computer'],[/相机|camera/i,'camera'],[/包|handbag/i,'bag'],[/鞋|shoe/i,'shoes'],[/衣|衫|裙|coat|shirt|dress/i,'clothing'],[/项链|戒指|jewel/i,'jewelry'],[/花束|bouquet/i,'flower bouquet']];
  async function promptFor(rec){const p=rec.product||(await productRows()).find(x=>rowKey(x)===rec.key||(rec.key===normal(rec.title)&&normal(x.title)===rec.key))||{},kind=kinds.find(([r])=>r.test(rec.title))?.[1]||'the described product',text=normal(p.detail||p.description||rec.description).slice(0,1800),food=p.type==='eats'||/dessert|ice cream|rice|pizza|burger|sushi|dish|drink/.test(kind);
-  return ['Create one clean commercial '+(food?'food':'product')+' photograph for an online shop.','Main subject: '+kind+'.','Exact product name (Chinese or English): '+rec.title+'.',p._category?'Product category: '+p._category:'',p.seller?'Seller or brand context: '+p.seller:'','World and style context: '+normal(p._worldview||generationSettings().worldview).slice(0,1800),text?'Product details: '+text:'','Depict this exact generated product and its components, following its category and description. Show the complete item with natural proportions.',food?'Freshly prepared food on a simple white plate, appetizing texture, pure white background, soft daylight.':'One main product on a pure white background (#FFFFFF), soft studio lighting, realistic materials, subtle contact shadow.','Square composition. Centered subject, about 75 percent of the frame, generous clean margins.','No people, hands, shop interiors, storefronts, diagrams, price labels, extra captions, watermarks or collage. No invented large brand logos.'].filter(Boolean).join('\n');
+  return ['Create one clean commercial '+(food?'food':'product')+' photograph for an online shop.','Main subject: '+kind+'.','Exact product name (Chinese or English): '+rec.title+'.',p._category?'Product category: '+p._category:'',p.seller?'Seller or brand context: '+p.seller:'','World and style context: '+normal(p._kind==='phone'?'':p._worldview||generationSettings().worldview).slice(0,1800),text?'Product details: '+text:'',p._kind==='phone'?'Selected variant: '+Object.entries(p.selectedOptions||{}).map(([key,value])=>key+' = '+value).join(', '):'','Depict this exact generated product and its components, following its category and description. Show the complete item with natural proportions.',food?'Freshly prepared food on a simple white plate, appetizing texture, pure white background, soft daylight.':'One main product on a pure white background (#FFFFFF), soft studio lighting, realistic materials, subtle contact shadow.','Square composition. Centered subject, about 75 percent of the frame, generous clean margins.','No people, hands, shop interiors, storefronts, diagrams, price labels, extra captions, watermarks or collage. No invented large brand logos.'].filter(Boolean).join('\n');
  }
 
+ // TA phone products have their own source. Only product descriptions enter image prompts.
+ const phoneEntries=new Map();
+ function phoneProducts(profile){
+  const rows=[];
+  for(const area of ['cart','orders']){
+   for(const item of Array.isArray(profile[area])?profile[area]:[]){
+    if(!item||item.type==='ticket'||!normal(item.title))continue;
+    const options=Object.entries(item.selectedOptions||{}).filter(([,value])=>['string','number'].includes(typeof value)).sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>[normal(key),normal(value)]);
+    const description=safeImage(item.image)||placeholder(String(item.image||''))?'':normal(item.image);
+    const identity=JSON.stringify(['phone-product',normal(item.title),normal(item.seller),options]);
+    rows.push({id:identity,title:normal(item.title),seller:normal(item.seller),description,selectedOptions:Object.fromEntries(options),_kind:'phone',_phoneArea:area,_phoneKey:identity,_categoryId:String(profile.contactId||''),_category:area==='cart'?'TA 手机购物车':'TA 手机购买记录',_worldview:'',image:safeImage(item.image)});
+   }
+  }
+  return rows;
+ }
+ function phoneSurfaces(){
+  const found=[];
+  for(const heading of document.querySelectorAll('h1,span.font-bold.ml-2')){
+   const title=normal(heading.textContent);
+   if(title==='CART'){
+    const market=heading.closest('.market-app');
+    if(!market||market.querySelectorAll('.market-tab-bar button').length!==2)continue;
+    const header=heading.parentElement?.parentElement,root=header?.parentElement;
+    if(root)found.push({root,header,area:'cart',name:'TA 手机 · 购物车'});
+   }else if(title==='购买记录'){
+    const header=heading.parentElement,root=header?.parentElement;
+    if(!root?.classList.contains('h-full')||!root.classList.contains('bg-gray-50'))continue;
+    if(!root.closest('.fixed.inset-0.bg-black.overflow-hidden'))continue;
+    found.push({root,header,area:'orders',name:'TA 手机 · 购买记录'});
+   }
+  }
+  return found;
+ }
+ function phoneSeller(card){
+  const group=card.closest('.group')||card;
+  const own=[...group.querySelectorAll('span.material-symbols-outlined')].find(el=>normal(el.textContent)==='storefront');
+  const icon=own||[...group.parentElement?.querySelectorAll('span.material-symbols-outlined')||[]].find(el=>normal(el.textContent)==='storefront');
+  return icon?normal(icon.parentElement.textContent).replace(/^storefront\s*/,''):'';
+ }
+ function bindPhoneRecord(record){
+  const title=normal(record.card.querySelector('h3')?.textContent),seller=phoneSeller(record.card),text=normal(record.card.textContent);
+  let matches=catalog.filter(p=>p.kind==='phone'&&p.title===title&&(!seller||p.seller===seller));
+  if(matches.length>1){
+   const variants=matches.filter(p=>Object.values(p.product.selectedOptions).every(value=>text.includes(value)));
+   if(variants.length)matches=variants;
+  }
+  const unique=new Map(matches.map(p=>[p.key,p]));
+  const match=unique.size===1?[...unique.values()][0]:null;
+  const key=match?.key||JSON.stringify(['phone-unmatched',title,seller]);
+  if(record.key!==key){unloadImage(record);record.key=key;}
+  record.title=title;record.kind='phone';record.legacyKey=undefined;record.product=match?.product;record.matched=!!match;
+  record.img.alt=title+'（AI 生成示意图）';
+ }
+ function phonePlan(root){
+  const recordsByKey=new Map();
+  for(const record of records)if(record.isPhone&&record.matched&&record.img.isConnected&&root.contains(record.img))recordsByKey.set(record.key,record);
+  const all=[...recordsByKey.values()];
+  const available=record=>!pending.has(record.key)&&activeTask?.key!==record.key&&!['running','unknown'].includes(effectiveJob(record)?.status);
+  return {all,batch:all,todo:all.filter(record=>available(record)&&!effectiveJob(record)?.hasImage),replace:all.filter(available),saved:all.filter(record=>effectiveJob(record)?.hasImage).length,queued:all.filter(record=>pending.has(record.key)).length};
+ }
+ async function startPhoneImages(view,force=false){
+  if(stopped||!ready||!view.phoneRoot.isConnected)return;
+  await productRows();
+  const plan=phonePlan(view.phoneRoot),chosen=force?plan.replace:plan.todo,keys=new Set(plan.all.map(record=>record.key));
+  if(!chosen.length){setText(view.message,'当前页面没有可以安排的商品图片。');return;}
+  for(const [key,task]of pending)if(!keys.has(key)&&!task.rec.isProbe)pending.delete(key);
+  queueScope=null;batchPaused=false;
+  for(const record of chosen)enqueue({...recordFor(record.product)},'',false,force,true);
+  panelMessage='已安排'+view.phoneName+' '+chosen.length+' 张图片，依次生成并保存。';tool();
+ }
+ function updatePhoneControls(view){
+  const plan=phonePlan(view.phoneRoot);
+  setText(view.summary,view.phoneName+' · '+plan.all.length+' 件商品，已配图 '+plan.saved+' 件。');
+  setText(view.start,'补齐当前页面缺图 '+plan.todo.length+' 张');view.start.disabled=!ready||!plan.todo.length||!view.phoneRoot.isConnected;
+  view.start.onclick=()=>startPhoneImages(view).catch(error=>{setText(view.message,String(error.message||'读取商品失败'));});
+  setText(view.progress,progressText(plan));setText(view.message,panelMessage);
+  setText(view.validationStatus,providerLabel());
+ }
+ function phoneSettings(surface){
+  const box=sheet('TA 手机商品图片');
+  const view={box,phoneRoot:surface.root,phoneName:surface.name,summary:node('p'),start:button('',()=>{},'rmai-action rmai-primary'),progress:node('p'),message:node('p'),validationStatus:node('p')};
+  settingsView=view;
+  const items=node('div','rmai-item-list');
+  box.append(view.summary,view.start,view.progress,view.message,view.validationStatus,button('独立生图接口设置',providerPanel,'rmai-action'),node('p','','同一商品在购物车和购买记录中复用配图。点击上方按钮后才会生成，每张图片按所选生图接口计费。失败或刷新后请查看任务状态，再决定是否继续。'),items);
+  for(const record of phonePlan(surface.root).all){
+   const item=button(record.title,()=>itemPanel({...recordFor(record.product)}),'rmai-item');items.append(item);
+  }
+  updatePhoneControls(view);
+  productRows().then(()=>{if(view.box.isConnected)updatePhoneControls(view);}).catch(()=>{});
+ }
+ function discoverPhone(){
+  for(const [root,entry]of phoneEntries)if(!root.isConnected){entry.button.remove();root.classList.remove('rmai-phone-root');phoneEntries.delete(root);}
+  for(const surface of phoneSurfaces()){
+   const {root,header}=surface;root.classList.add('rmai-phone-root');
+   if(!phoneEntries.has(root)){
+    const action=button('商品图片',()=>phoneSettings(surface),'rmai-phone-entry rmai-owned');
+    header.append(action);phoneEntries.set(root,{button:action,surface});
+   }
+   for(const img of root.querySelectorAll('img.object-contain')){
+    const existing=byImg.get(img);
+    if(existing){
+     if(existing.isPhone){
+      const current=img.getAttribute('src')||'';
+      if(placeholder(current)&&current!==existing.original)existing.original=current;
+      bindPhoneRecord(existing);
+      if(ready&&existing.near&&img.getAttribute('src')===existing.original)paint(existing).catch(()=>{});
+     }
+     continue;
+    }
+    const src=img.getAttribute('src')||'';
+    if(!placeholder(src))continue;
+    const wrap=img.parentElement;
+    let card=img.closest('.group')||wrap.parentElement;
+    for(let depth=0;card&&depth<5&&!card.querySelector('h3');depth++)card=card.parentElement;
+    if(!card||card===root||!card.querySelector('h3'))continue;
+    const record={img,wrap,card,isPhone:true,title:normal(card.querySelector('h3').textContent),key:'',original:src,alt:img.getAttribute('alt'),loading:img.getAttribute('loading'),decoding:img.getAttribute('decoding'),near:false};
+    record.note=node('span');record.empty=node('div','rmai-empty rmai-owned');record.empty.append(record.note);
+    wrap.classList.add('rmai-media','rmai-cart');img.classList.add('rmai-image');img.loading='lazy';img.decoding='async';wrap.append(record.empty);
+    records.add(record);byImg.set(img,record);bindPhoneRecord(record);
+    if(ready){paint(record).catch(()=>{});near.observe(img);}else note(record,'载入中…');
+   }
+  }
+ }
  function phase(value){if(activeTask){activeTask.phase=value;activeTask.phaseStarted=Date.now();}tool();}
  function imageResult(value,depth=0){if(depth>5||!value)return '';if(typeof value==='string')return safeImage(value);if(typeof value!=='object')return '';for(const k of ['b64_json','base64','image_base64']){const b=value[k];if(typeof b==='string'){const clean=b.replace(/\s/g,'');if(/^[A-Za-z0-9+/]+=*$/.test(clean)&&clean.length>100)return 'data:image/png;base64,'+clean;}}for(const k of ['url','image_url','imageUrl','output_url','image','inlineData','inline_data']){const found=imageResult(value[k],depth+1);if(found)return found;}if(value.mimeType&&typeof value.data==='string')return safeImage('data:'+value.mimeType+';base64,'+value.data);for(const k of ['data','images','output','result','results','content','parts','candidates']){const values=Array.isArray(value[k])?value[k]:[value[k]];for(const v of values){const found=imageResult(v,depth+1);if(found)return found;}}return '';}
  async function externalImage(prompt,config){
@@ -303,16 +427,18 @@
  .rmai-sheet button,.rmai-sheet select,.rmai-sheet textarea{font-family:inherit;font-size:13px}.rmai-action{display:block;width:100%;margin:12px 0;padding:12px 15px;border:1px solid #e8e8e8;border-radius:13px;background:#f7f7f7;color:#222;cursor:pointer}.rmai-action:disabled{opacity:.4;cursor:default}.rmai-primary{background:#111;border-color:#111;color:white}.rmai-close{float:right;border:0;border-radius:50%;width:30px;height:30px;background:#f4f4f4;color:#666;cursor:pointer}.rmai-sheet select{width:100%;border:1px solid #e8e8e8;border-radius:12px;padding:11px;background:white;color:#333}.rmai-sheet textarea{box-sizing:border-box;width:100%;min-height:150px;border:1px solid #e8e8e8;border-radius:12px;padding:12px;background:white;color:#333;line-height:1.5;resize:vertical}.rmai-sheet img{display:block;max-width:100%;width:260px;margin:12px auto;border-radius:15px}.rmai-row{border-top:1px solid #eee;padding-top:10px;margin-top:10px}.rmai-item-list{margin-top:16px}.rmai-item{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:12px 0;border:0;border-top:1px solid #eee;background:white;text-align:left;cursor:pointer}.rmai-item>span:first-child{font-size:12px;line-height:1.5;flex:1;min-width:0}.rmai-item>span:last-child{font-size:11px;white-space:nowrap;color:#888}
  `;document.head.append(css);
  css.textContent+=' .rmai-action[hidden]{display:none!important}.rmai-native-controls .rmai-link{font-size:11px;font-family:inherit}.rmai-api-card{padding:20px;margin:16px 0;background:#fafafa;border-radius:20px;color:#27272a;font:13px/1.6 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif}.rmai-api-card p{font-size:12px;color:#71717a;margin:10px 0 16px}.rmai-api-card select,.rmai-field input{box-sizing:border-box;display:block;width:100%;padding:12px;margin:8px 0;border:1px solid #e4e4e7;border-radius:10px;background:white;color:#27272a;font:inherit}.rmai-api-card button{border:0;background:transparent;color:#2563eb;font:inherit;padding:8px 12px 8px 0}.rmai-field{display:block;font-size:12px;color:#666;margin:16px 0}.rmai-api-card small{display:block;color:#a1a1aa}.rmai-api-card p{white-space:pre-line}.rmai-api-card button[hidden]{display:none!important}.rmai-api-card button:disabled{opacity:.45;cursor:default}.rmai-category-link{position:relative;z-index:2;flex-shrink:0;margin-left:10px;padding:6px 10px;border:1px solid #e5e5e5;border-radius:8px;background:#fafafa;color:#555;font:11px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer}.rmai-scope-label{display:block;font-size:12px;color:#666;margin:8px 0 12px}.rmai-scope-label select{margin-top:8px}';
+ css.textContent=css.textContent.replaceAll('.market-app .rmai',':is(.market-app,.rmai-phone-root) .rmai').replaceAll('.market-app img.rmai',':is(.market-app,.rmai-phone-root) img.rmai');
+ css.textContent+=' .rmai-phone-entry{margin-left:auto;margin-right:8px;flex-shrink:0;padding:7px 10px;border:1px solid #e5e5e5;border-radius:9px;background:#fff;color:#444;font:11px -apple-system,BlinkMacSystemFont,sans-serif}.rmai-phone-root .rmai-empty{background:#f5f5f4;color:#999}.rmai-phone-root .rmai-cart{border-radius:10px!important}';
  function note(r,s){r.note.textContent=s;}
  async function paint(r){if(stopped||!r.img.isConnected)return;const j=effectiveJob(r),queued=pending.has(r.key),active=activeTask?.key===r.key;note(r,active&&activeTask.phase==='lock'?'等待其他生图任务':j?.status==='running'?'生成中…':queued?(batchPaused?'队列已暂停':'已排队'):j?.status==='unknown'?'结果待确认':j?.status==='failed'?'生图失败 · 设置中查看':j?.hasImage?'正在载入图片…':'待配图');if(j?.hasImage&&r.near){const key=r.key,src=await imageUrl(key);if(stopped||r.key!==key||!r.near||!r.img.isConnected||!src)return;r.img.onload=()=>{if(!stopped&&r.near)r.wrap.classList.add('rmai-ready');};r.img.onerror=()=>{r.wrap.classList.remove('rmai-ready');note(r,'图片暂时无法显示');};if(r.img.getAttribute('src')!==src)r.img.src=src;if(r.img.complete&&r.img.naturalWidth)r.wrap.classList.add('rmai-ready');}}
  function paintKey(key){for(const r of records)if(r.key===key)paint(r).catch(()=>note(r,'图片缓存暂不可用'));tool();}
  function setText(n,s){if(n.textContent!==s)n.textContent=s;}
- function batchPlan(limit=generationSettings().total){const unique=new Map();for(const img of document.querySelectorAll('.market-app img.rmai-image')){const r=byImg.get(img);if(r?.img.isConnected&&!unique.has(r.key))unique.set(r.key,r);}const all=[...unique.values()],batch=all.slice(0,limit),todo=batch.filter(r=>!effectiveJob(r)&&!pending.has(r.key));return {all,batch,todo,saved:batch.filter(r=>effectiveJob(r)?.hasImage).length,queued:batch.filter(r=>pending.has(r.key)).length,running:batch.filter(r=>effectiveJob(r)?.status==='running').length};}
+ function batchPlan(limit=generationSettings().total){const unique=new Map();for(const img of document.querySelectorAll('.market-app img.rmai-image')){const r=byImg.get(img);if(r?.img.isConnected&&!r.isPhone&&!unique.has(r.key))unique.set(r.key,r);}const all=[...unique.values()],batch=all.slice(0,limit),todo=batch.filter(r=>!effectiveJob(r)&&!pending.has(r.key));return {all,batch,todo,saved:batch.filter(r=>effectiveJob(r)?.hasImage).length,queued:batch.filter(r=>pending.has(r.key)).length,running:batch.filter(r=>effectiveJob(r)?.status==='running').length};}
  function startBatch(limit){if(!ready||stopped)return;if(provider.source==='system'&&typeof api?.ai?.generateImage!=='function'){panelMessage='请先更新 Roche，当前版本没有系统生图接口。';settings();return;}const plan=batchPlan(limit);if(!plan.todo.length)return;queueScope=null;batchPaused=false;panelMessage='已安排本批 '+plan.todo.length+' 张商品图片，依次生成并保存。';for(const r of plan.todo)enqueue(r,'',false);tool();pump();}
  function countSettings(panel){const fallback=generationSettings(),inputs=[...panel.querySelectorAll('input[type="number"]')],count=(input,def,max)=>Math.max(1,Math.min(max,Math.floor(Number(input?.value)||def))),categories=count(inputs[0],fallback.categories,5),items=count(inputs[1],fallback.items,10);return {categories,items,total:categories*items};}
  function progressText(plan){const seconds=activeTask?Math.floor((Date.now()-activeTask.started)/1000):0,labels={lock:'等待其他页面的生图任务',preparing:'正在整理商品资料',request:'等待生图接口响应',response:'正在读取接口返回',download:'正在获取已生成的图片',compress:'正在压缩图片',save:'正在保存图片'},status=activeTask?(labels[activeTask.phase]||'正在处理')+'（'+seconds+' 秒）'+(currentTitle?'\n'+currentTitle:'')+(activeTask.route?'\n请求地址：'+activeTask.route:''):batchPaused?'队列已暂停，可继续其余任务':working?'正在整理商品资料':pending.size?'等待开始':'当前没有运行中的任务';return '本批已保存 '+plan.saved+' / '+plan.batch.length+' 张'+(plan.queued?' · 等待 '+plan.queued+' 张':'')+'\n'+status;}
  function resumeQueue(scope=null){if(activeTask){panelMessage='当前请求仍未结束，暂不能继续后续任务。外接接口最多等待 240 秒；请勿重复提交。';tool();return;}queueScope=scope;const keys=scope?new Set(categoryPlan(scope).all.map(r=>r.key)):null;if(keys)for(const [key,task]of pending)if(!keys.has(key)&&!task.rec.isProbe)pending.delete(key);batchPaused=false;panelMessage=(scope?'仅继续「'+scope.name+'」的':'继续')+'尚未发出的任务，使用当前生图接口。';for(const task of pending.values())task.provider={...provider};for(const r of records)paint(r).catch(()=>{});tool();pump();}
- function updateControls(view){if(!view.box.isConnected)return;const setting=view.panel?countSettings(view.panel):generationSettings(),scope=view.scope===undefined?currentCategory():view.scope,plan=scope?categoryPlan(scope):batchPlan(setting.total),resume=batchPaused&&(scope?plan.queued:pending.size)>0;
+ function updateControls(view){if(!view.box.isConnected)return;if(view.phoneRoot){updatePhoneControls(view);return;}const setting=view.panel?countSettings(view.panel):generationSettings(),scope=view.scope===undefined?currentCategory():view.scope,plan=scope?categoryPlan(scope):batchPlan(setting.total),resume=batchPaused&&(scope?plan.queued:pending.size)>0;
   setText(view.summary,scope?'仅类目「'+scope.name+'」：共 '+plan.batch.length+' 件，已配图 '+plan.saved+' 件。':setting.categories+' 个分类 × 每类 '+setting.items+' 件 = '+setting.total+' 张；按当前列表顺序配图。');
   setText(view.start,resume&&activeTask?'等待当前请求结束':resume?'继续'+(scope?'本类目':'队列')+' · 剩余 '+(scope?plan.queued:pending.size)+' 张':plan.todo.length?(scope?'补齐本类目缺图 ':'一键生成本批 ')+plan.todo.length+' 张':plan.running||plan.queued?'图片正在生成':plan.batch.length?'当前范围暂无待补图片':'当前范围没有商品');view.start.disabled=!ready||(resume&&!!activeTask)||(!resume&&!plan.todo.length);
   view.start.onclick=e=>{e.preventDefault();e.stopPropagation();if(resume)resumeQueue(scope);else if(scope)startCategory(scope).catch(error=>{panelMessage=error.message;tool();});else startBatch((view.panel?countSettings(view.panel):generationSettings()).total);};
@@ -342,8 +468,8 @@
  }
  async function pump(){if(working||stopped||!ready)return;working=true;heartbeat=setInterval(()=>{if(stopped)return;for(const view of nativePanels.values())updateControls(view);if(settingsView)updateControls(settingsView);},1000);tool();try{while(pending.size&&!stopped){const entry=[...pending].find(([,t])=>t.rec.isProbe)||(batchPaused?[...pending].find(([,t])=>t.manual):pending.entries().next().value);if(!entry)break;const [key,task]=entry;activeTask={key,started:Date.now(),phase:'lock'};let timer;const run=async()=>{clearTimeout(timer);if(stopped||!pending.has(key))return;pending.delete(key);task.provider={...provider};activeTask.phase='preparing';paintKey(key);await generate(task);};try{if(navigator.locks?.request){const controller=new AbortController();timer=setTimeout(()=>controller.abort(),15000);await navigator.locks.request('roche-market-ai-native-generation',{mode:'exclusive',signal:controller.signal},run);}else await run();}catch(error){batchPaused=true;panelMessage=error.name==='AbortError'?'等待生图锁超过 15 秒，任务尚未发出。请关闭其他正在生图的 Roche 页面，或等待其结束后点“继续队列”。':String(error?.message||'任务未能保存，未发起生图。');paintKey(key);break;}finally{clearTimeout(timer);activeTask=null;}}}finally{clearInterval(heartbeat);working=false;if(stopped&&!hostBusy)db?.close();else tool();}}
  const near=new IntersectionObserver(entries=>{for(const e of entries){const r=byImg.get(e.target);if(!r)continue;r.near=e.isIntersecting;if(r.near)paint(r).catch(()=>{});else if(!unloadTimer)unloadTimer=setTimeout(()=>{unloadTimer=null;if(stopped)return;for(const rec of records)if(!rec.near&&rec.img.isConnected)unloadImage(rec);evictImages();},300);}},{rootMargin:'240px 0px'});
- async function scanNew(){scanTimer=null;if(!ready||stopped||scanning||!document.querySelector('.market-app'))return;scanning=true;try{const rows=await productRows(),fresh=[];for(const p of rows){const key=rowKey(p);if(!normal(p.title))continue;if(!seenProducts.has(key)){seenProducts.add(key);known.add(key);fresh.push(p);}}preferences();if(pref.mode!=='batch')return;const setting=generationSettings(),eligible=fresh.filter(p=>(!queueScope||(p._kind===queueScope.kind&&String(p._categoryId)===String(queueScope.id)))&&!effectiveJob(recordFor(p))&&!pending.has(rowKey(p))).slice(0,setting.total);if(eligible.length)panelMessage='商城本轮新增 '+fresh.length+' 件；按照生成设置安排 '+eligible.length+' 个商品生图任务。';for(const p of eligible)enqueue(recordFor(p),'',false);}finally{scanning=false;}}
- function discover(){scheduled=false;if(stopped)return;tool();for(const r of records)if(!r.img.isConnected){near.unobserve(r.img);records.delete(r);}evictImages();const root=document.querySelector('.market-app');if(!root)return;
+ async function scanNew(){scanTimer=null;if(!ready||stopped||scanning||!document.querySelector('.market-app'))return;scanning=true;try{const rows=await productRows(),fresh=[];for(const p of rows){if(p._kind==='phone')continue;const key=rowKey(p);if(!normal(p.title))continue;if(!seenProducts.has(key)){seenProducts.add(key);known.add(key);fresh.push(p);}}preferences();if(pref.mode!=='batch')return;const setting=generationSettings(),eligible=fresh.filter(p=>(!queueScope||(p._kind===queueScope.kind&&String(p._categoryId)===String(queueScope.id)))&&!effectiveJob(recordFor(p))&&!pending.has(rowKey(p))).slice(0,setting.total);if(eligible.length)panelMessage='商城本轮新增 '+fresh.length+' 件；按照生成设置安排 '+eligible.length+' 个商品生图任务。';for(const p of eligible)enqueue(recordFor(p),'',false);}finally{scanning=false;}}
+ function discover(){scheduled=false;if(stopped)return;discoverPhone();tool();for(const r of records)if(!r.img.isConnected){near.unobserve(r.img);records.delete(r);}evictImages();const root=document.querySelector('.market-app');if(!root)return;
   for(const img of root.querySelectorAll('img')){const existing=byImg.get(img),src=img.getAttribute('src')||'';if(existing){bindRecord(existing);if(placeholder(src)&&src!==existing.original){existing.near=false;near.unobserve(img);records.delete(existing);byImg.delete(img);img.onload=img.onerror=null;existing.empty.remove();existing.wrap.classList.remove('rmai-ready','rmai-home','rmai-eats','rmai-detail','rmai-cart');}else{if(src===existing.original&&effectiveJob(existing)?.hasImage)paint(existing).catch(()=>{});continue;}}const isCart=img.hasAttribute('data-v-a79dfc6a');if(!placeholder(src)||(img.classList.contains('object-contain')&&!isCart))continue;const wrap=img.parentElement;let card=wrap,heading;if(isCart){card=img.closest('div.group[data-v-a79dfc6a]')||wrap.parentElement;heading=card?.querySelector('h3');}else for(let i=0;i<4&&card&&card!==root;i++,card=card.parentElement){heading=card.querySelector('h3,h1');if(heading)break;}if(!card||(!heading&&!isCart))continue;const title=isCart?cartTitle(card):normal(heading.textContent);if(!title)continue;
    const r={img,wrap,card,isCart,title,key:title,description:normal(card.querySelector('p')?.textContent),original:src,alt:img.getAttribute('alt'),loading:img.getAttribute('loading'),decoding:img.getAttribute('decoding'),near:false,isNew:ready&&!known.has(title)};known.add(title);preferences();r.note=node('span','');r.empty=node('div','rmai-empty rmai-owned');r.empty.append(r.note);wrap.classList.add('rmai-media',isCart?'rmai-cart':heading.tagName==='H1'?'rmai-detail':wrap.classList.contains('h-40')?'rmai-eats':'rmai-home');img.classList.add('rmai-image');img.loading='lazy';img.decoding='async';img.alt=title+'（AI 生成示意图）';wrap.append(r.empty);records.add(r);byImg.set(img,r);bindRecord(r);if(ready){paint(r).catch(()=>{});near.observe(img);}else note(r,'载入中…');
   }
@@ -411,7 +537,7 @@
  }
  async function itemPanel(r){const box=sheet(r.title),j=effectiveJob(r);previewKey=r.key;if(j?.hasImage){try{const src=await imageUrl(r.key);if(src&&box.isConnected){const im=node('img');im.src=src;im.alt=r.title;box.append(im);}}catch{}}if(!box.isConnected)return;box.append(node('p','',providerLabel()+'。提示词只包含商品资料，不额外调用聊天模型。'));if(j?.error)box.append(node('p','',j.error));if(j?.status==='unknown')box.append(node('p','','上次任务可能已经产生费用，但本机没有确认结果。请先查看生图后台，再决定是否重新生成。'));const input=node('textarea');input.setAttribute('aria-label','商品图片提示词');input.placeholder='正在整理商品资料…';box.append(input);promptFor(r).then(p=>{if(box.isConnected&&!input.value)input.value=p;}).catch(()=>{if(box.isConnected)input.placeholder='请填写商品图描述';});const act=button(j?.hasImage?'重新生成一张 · 可能计费':'生成这一件 · 可能计费',()=>{enqueue(r,input.value,true,!!j?.hasImage);close();},'rmai-action rmai-primary');act.disabled=j?.status==='running';box.append(act);}
  const observer=new MutationObserver(ms=>{if(ms.some(m=>!m.target.closest?.('.rmai-owned')&&(m.type==='attributes'||[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned')))))schedule(ms.some(m=>m.type==='childList'&&!m.target.closest?.('.rmai-owned')&&[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned'))));});document.addEventListener('click',onCategoryNavigation,true);observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
- window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;removeGiftBridge();clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy&&!giftBusy)db?.close();}};
+ window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;for(const [root,entry]of phoneEntries){entry.button.remove();root.classList.remove('rmai-phone-root');}phoneEntries.clear();removeGiftBridge();clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy&&!giftBusy)db?.close();}};
  try{window.RochePlugin?.register({id:ID,name:'商城 AI 商品图 · 独立生图接口',version:VERSION});}catch{}
  discover();
  (async()=>{try{db=await database();if(stopped){db.close();return;}const savedHostProblems=await read('settings','hostProblems');if(savedHostProblems?.items)hostProblems=savedHostProblems.items;const savedValidation=await read('settings','validation');if(savedValidation)validation=savedValidation;if(['checking','generating','queued'].includes(validation.state))validation={...validation,state:'unverified',message:'上次验证没有确认结果，请先查看服务商记录，不会自动重新生图。'};const savedProvider=await read('settings','provider');if(savedProvider&&['system','preset','custom'].includes(savedProvider.source))provider={...provider,...savedProvider};for(const j of await read('jobs')){jobs.set(j.key,j.status==='running'&&j.owner!==owner?{...j,status:'unknown',error:'页面曾在生图时关闭或刷新。上次任务结果未确认，不会自动重新调用。'}:j);}for(const p of await productRows()){const k=rowKey(p);known.add(normal(p.title));seenProducts.add(k);}if(stopped){db.close();return;}preferences();ready=true;initGiftVision();fillBindingOptions();for(const r of records){r.isNew=false;paint(r).catch(()=>{});near.observe(r.img);}schedule();}catch(error){panelMessage=String(error?.message||'图片缓存不可用');for(const r of records)note(r,'图片缓存暂不可用');tool();}})();
