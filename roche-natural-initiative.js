@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.3.1
+/* Roche 自然主动 v1.4.0
  * Enhance browser Director DMs. Adaptive mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,13 +6,40 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', VERSION='1.3.1', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', VERSION='1.4.0', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
  const cfg={...defaults,...saved.config}, records=saved.records||{};
  let active=true, observer, queued=false, last='已就绪，等待下一次开口机会。', matched=0, bridge=null, bridgeAttempted=false, bridgeDetail='', ticking=false, trial=null;
  const panels=new Set(), pending=new Set(), automatic=new Map();
+ let contactSettings=readContactSettings();
+ function readContactSettings(){
+  try{
+   const value=JSON.parse(localStorage.getItem(CONTACT_KEY)||'{}');
+   if(value&&typeof value==='object'&&!Array.isArray(value))return Object.fromEntries(Object.entries(value).filter(([,enabled])=>typeof enabled==='boolean'));
+  }catch{}
+  return {};
+ }
+ function contactEnabled(id){
+  if(id===null)return true;
+  if(id===undefined)return false;
+  return contactSettings[String(id)]!==false;
+ }
+ function setContactEnabled(id,enabled){
+  const next={...readContactSettings(),[String(id)]:enabled};
+  try{localStorage.setItem(CONTACT_KEY,JSON.stringify(next));contactSettings=next;}
+  catch{note('未能保存联系人开关，请检查浏览器存储空间。');return;}
+  for(const root of panels){paintContact(root);if(bridge)inspect(root);}
+  const char=bridge?.state.contacts.find(c=>String(c.id)===String(id));
+  note((char?.name||'此联系人')+(enabled?'：自然主动已开启。':'：自然主动已关闭，沿用系统漫谈设置。'));
+ }
+ function onContactStorage(event){
+  if(event.key!==CONTACT_KEY&&event.key!==null)return;
+  contactSettings=readContactSettings();
+  for(const root of panels){paintContact(root);if(bridge)inspect(root);}
+ }
+ window.addEventListener('storage',onContactStorage);
  const bound=(v,a,b,f)=>Number.isFinite(Number(v))?Math.max(a,Math.min(b,Math.round(Number(v)))):f;
  const minute=s=>/^\d{2}:\d{2}$/.test(s)&&Number(s.slice(0,2))<24&&Number(s.slice(3))<60?Number(s.slice(0,2))*60+Number(s.slice(3)):null;
  function normalize(){cfg.min=bound(cfg.min,5,720,25);cfg.max=bound(cfg.max,cfg.min,1440,110);cfg.unanswered=bound(cfg.unanswered,1,5,2);cfg.periods=(Array.isArray(cfg.periods)?cfg.periods:defaults.periods).filter(p=>minute(p?.start)!==null&&minute(p?.end)!==null).slice(0,12);}
@@ -35,8 +62,23 @@
   let unanswered=0;for(let i=lines.length-1;i>=0;i--){if(lines[i].startsWith(me+':'))break;if(lines[i].startsWith(char+':'))unanswered++;}
   let userIndex=-1;lines.forEach((s,i)=>{if(s.startsWith(me+':'))userIndex=i;});
   const lastUser=userIndex<0?'':lines.slice(Math.max(0,userIndex-3),userIndex+1).join('\n');
-  return {key:hash(char+'\n'+handle+'\n'+me),char,text,memory,unanswered,user:hash(lastUser),recent:lines.filter(s=>s.startsWith(char+':')).slice(-12).map(s=>norm(s.slice(char.length+1)))};
+  return {key:hash(char+'\n'+handle+'\n'+me),char,handle,me,text,memory,unanswered,user:hash(lastUser),recent:lines.filter(s=>s.startsWith(char+':')).slice(-12).map(s=>norm(s.slice(char.length+1)))};
  }
+ function resolveContact(meta,requestedId){
+  const contacts=bridge?.state.contacts||[];
+  const matches=contacts.filter(c=>c.name===meta.char&&String(c.handle||'')===meta.handle);
+  const permit=[...automatic.values()].find(item=>item.legacyKey===meta.key);
+  const id=requestedId??(trial?.busy&&trial.legacyKey===meta.key?trial.contactId:permit?.contactId);
+  if(id!==undefined&&id!==null){
+   const match=matches.find(c=>String(c.id)===String(id));
+   if(match||!bridge)return String(id);
+  }
+  if(matches.length===1)return String(matches[0].id);
+  // Identical names and handles cannot identify the recipient of a native request.
+  // Leave that request with the native system until an explicit recipient is available.
+  return matches.length>1||Object.values(contactSettings).includes(false)?undefined:null;
+ }
+ const contactRecordKey=(id,persona)=>hash('contact:'+id+'\n'+persona);
  const isMessageTest=meta=>!!trial?.busy&&trial.key===meta.key&&trial.mode==='send';
  function rules(meta,rec){
   if(isMessageTest(meta))return `\n\n【用户手动点击：测试发一条】
@@ -62,15 +104,19 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   else if(typeof p.instructions==='string')out.instructions=p.instructions+extra;
   return out;
  }
- function prepare(p,depth=0){
+ function prepare(p,depth=0,contactId){
   if(!p||typeof p!=='object'||depth>3)return null;
   // Native push schedule and generic API proxy wrappers; preserve routing and credentials verbatim.
-  if(p.payload&&typeof p.payload==='object'){const r=prepare(p.payload,depth+1);if(r)return {...r,body:{...p,payload:r.body},cloud:p.pushType==='char_direct_message'||r.cloud};}
+  if(p.payload&&typeof p.payload==='object'){const r=prepare(p.payload,depth+1,p.charId??contactId);if(r)return {...r,body:{...p,payload:r.body},cloud:p.pushType==='char_direct_message'||r.cloud};}
   if(p.url&&p.body&&p.bodyEncoding!=='base64'){
    let b;try{b=typeof p.body==='string'?JSON.parse(p.body):p.body;}catch{return null;}
-   const r=prepare(b,depth+1);if(r)return {...r,body:{...p,body:typeof p.body==='string'?JSON.stringify(r.body):r.body}};
+   const r=prepare(b,depth+1,contactId);if(r)return {...r,body:{...p,body:typeof p.body==='string'?JSON.stringify(r.body):r.body}};
   }
   const meta=identify(p);if(!meta)return null;
+  meta.contactId=resolveContact(meta,contactId);meta.legacyKey=meta.key;
+  if(!contactEnabled(meta.contactId))return null;
+  if(meta.contactId!==null)meta.key=contactRecordKey(meta.contactId,meta.me);
+  if(!records[meta.key]&&records[meta.legacyKey])records[meta.key]={...records[meta.legacyKey]};
   const rec=records[meta.key]||{rounds:0,next:0,seen:Date.now(),user:meta.user};
   if(rec.user!==meta.user){const first=!rec.user;rec.user=meta.user;rec.rounds=0;if(!first)rec.next=cfg.realistic?Date.now()+60000*(15+Math.random()*30):0;}
   records[meta.key]=rec;
@@ -115,6 +161,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   let raw=init?.body;
   if(raw===undefined&&request){if(!/json/i.test(request.headers.get('content-type')||''))return original.call(this,input,init);try{raw=await request.clone().text();}catch{return original.call(this,input,init);}}
   if(typeof raw!=='string'||raw.length>2000000||!raw.includes('Short Term Memory')||!raw.includes('本轮模式'))return original.call(this,input,init);
+  await loadBridge();
   let job;try{job=prepare(JSON.parse(raw));}catch{return original.call(this,input,init);}
   if(!job)return original.call(this,input,init);
   matched++;const {meta,rec}=job,testing=!!trial?.busy&&trial.key===meta.key;
@@ -190,9 +237,11 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
      if(conv.type==='group'||conv.isGroup||!conv.localSettings?.directMessageActivity?.enabled||conv.localSettings?.isBlocked)continue;
      const info=conversationInfo(core,conv);if(!info)continue;
      const {char,key}=info;
+     if(!contactEnabled(String(char.id)))continue;
      const messages=(state.messages?.[conv.id]||[]).filter(m=>!m.isSystem&&m.type!=='system_notice').sort((a,b)=>a.timestamp-b.timestamp);
      const lastUser=[...messages].reverse().find(m=>m.isMe);
      let rec=records[key];
+     if(!rec&&records[info.legacyKey])rec=records[key]={...records[info.legacyKey]};
      if(!rec){rec=records[key]={seen:Date.now(),rounds:0,next:Date.now()+60000*(15+Math.random()*30),user:'',observedUserId:lastUser?.id||''};save();continue;}
      if(lastUser&&rec.observedUserId!==lastUser.id){rec.observedUserId=lastUser.id;rec.rounds=0;rec.next=Date.now()+60000*(15+Math.random()*30);save();continue;}
      if(Date.now()<rec.next||rec.rounds>=cfg.unanswered||pending.has(key))continue;
@@ -201,7 +250,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
      rec.next=Date.now()+10*60000;save();count++;
      // Reserve a single request before native preparation. The reservation backoff
      // prevents rapid resubmission but must not block this very request in wrapped().
-     const permit={used:false};automatic.set(key,permit);
+     const permit={used:false,contactId:String(char.id),legacyKey:info.legacyKey};automatic.set(key,permit);
      try{await core.run(char.id,false,undefined,'message',conv.id,0);}
      finally{if(automatic.get(key)===permit)automatic.delete(key);}
     }
@@ -286,28 +335,58 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   const char=core.state.contacts?.find(c=>String(c.id)===String(conv.contactId||conv.id))||core.state.contacts?.find(c=>conv.participants?.includes(c.id));
   const persona=core.state.personas?.find(p=>p.id===(conv.localSettings?.myActivePersonaId||core.state.activePersonaId));
   if(!char?.name||!persona?.name)return null;
-  return {conv,char,key:hash(char.name+'\n'+(char.handle||'')+'\n'+persona.name)};
+  return {conv,char,key:contactRecordKey(String(char.id),persona.name),legacyKey:hash(char.name+'\n'+(char.handle||'')+'\n'+persona.name)};
+ }
+ function fillContacts(root,core){
+  const select=root.querySelector('[data-contact-target]');
+  const activeConversation=core.state.conversations.find(c=>String(c.id)===String(core.state.aiRequestState?.activeConversationId));
+  const previous=select.value||String(conversationInfo(core,activeConversation)?.char.id||'');
+  const contacts=core.state.contacts.filter(c=>c.id!==undefined&&c.id!==null&&c.name&&!c.isGroup&&c.type!=='group');
+  const signature=JSON.stringify(contacts.map(c=>[String(c.id),c.name,c.handle||'']));
+  if(select.dataset.contacts!==signature){
+   select.replaceChildren();
+   for(const char of contacts){
+    const option=document.createElement('option');option.value=String(char.id);
+    const duplicate=contacts.filter(c=>c.name===char.name).length>1;
+    option.textContent=char.name+(duplicate?' · '+(char.handle||String(char.id).slice(-6)):'');select.append(option);
+   }
+   select.dataset.contacts=signature;
+  }
+  if([...select.options].some(option=>option.value===previous))select.value=previous;
+  select.disabled=!contacts.length;
+  paintContact(root);
+ }
+ function paintContact(root){
+  const select=root.querySelector('[data-contact-target]'),toggle=root.querySelector('[data-contact-enabled]'),hint=root.querySelector('[data-contact-note]');
+  const id=select.value,char=bridge?.state.contacts.find(c=>String(c.id)===id);
+  toggle.disabled=!char;toggle.checked=!!char&&contactEnabled(id);
+  toggle.setAttribute('aria-label',char?'对 '+char.name+' 启用自然主动':'对所选联系人启用自然主动');
+  if(!char){hint.textContent=bridge?'请先添加 char 联系人。':'正在读取联系人；未显示时先打开一次角色聊天，再点“检查接入”。';return;}
+  hint.textContent=char.name+(toggle.checked?' 已开启自然主动。':' 已关闭自然主动，沿用系统漫谈设置。')+(!cfg.enabled?' 总开关已关闭，此联系人的选择已保存。':'');
  }
  function fillTargets(root,core){
   const select=root.querySelector('[data-target]'),previous=select.value||String(core.state.aiRequestState?.activeConversationId||'');
-  const conversations=core.state.conversations.filter(c=>(c.type==='dm'||c.type==='direct')&&conversationInfo(core,c));
+  const selectedContact=root.querySelector('[data-contact-target]').value;
+  const conversations=core.state.conversations.filter(c=>(c.type==='dm'||c.type==='direct')&&String(conversationInfo(core,c)?.char.id)===selectedContact);
   select.replaceChildren();
   for(const conv of conversations){const info=conversationInfo(core,conv),option=document.createElement('option');option.value=conv.id;option.textContent=info.char.name+(conv.localSettings?.directMessageActivity?.enabled?'':' · 漫谈未开启');select.append(option);}
   if(!select.options.length){const option=document.createElement('option');option.value='';option.textContent='暂无可识别的私聊';select.append(option);}
   if([...select.options].some(o=>o.value===previous))select.value=previous;
-  select.hidden=false;return conversationInfo(core,core.state.conversations.find(c=>String(c.id)===select.value));
+  select.hidden=conversations.length<=1;return conversationInfo(core,core.state.conversations.find(c=>String(c.id)===select.value));
  }
  async function inspect(root){
   const button=root.querySelector('[data-inspect]');button.disabled=true;
   try{
    if(!bridge)bridgeAttempted=false;
-   const core=await loadBridge(),info=core?fillTargets(root,core):null;
+   const core=await loadBridge();if(core)fillContacts(root,core);else paintContact(root);
+   const info=core?fillTargets(root,core):null;
    const cloud=localStorage.getItem('noir_webpush_char_activity_enabled')==='true';
    const rows=[['自然主动',cfg.enabled?'已开启':'请先打开上方总开关',cfg.enabled],['网页接入',core?'已适配，可试运行':bridgeDetail||'未适配此版本，暂不能手动试运行',!!core],['原会话漫谈',info?(info.conv.localSettings?.directMessageActivity?.enabled?'已开启 · '+info.char.name:'请先开启此角色的“启用漫谈”'):core?'暂无可用私聊，请先打开一次角色聊天':'待网页接入后读取',!!info?.conv.localSettings?.directMessageActivity?.enabled],['勿扰时段',quietNow()?'当前勿扰，不会试运行':'当前可检查',!quietNow()],['云端定时',cloud?'已开启；单次测试可用，真人自动调度需关闭':'未开启',!cloud]];
+   rows.splice(1,0,['所选联系人',info?(contactEnabled(String(info.char.id))?'已开启 · '+info.char.name:'已关闭 · '+info.char.name):'请先选择有私聊记录的联系人',!!info&&contactEnabled(String(info.char.id))]);
    if(cfg.realistic)rows.push(['多窗口协调',navigator.locks?.request?'支持':'此浏览器暂不支持',!!navigator.locks?.request]);
    const box=root.querySelector('[data-report]');box.replaceChildren();box.hidden=false;
    for(const [label,value,ok] of rows){const row=document.createElement('div');row.className='ni-report-row';row.dataset.ok=ok;const a=document.createElement('span'),b=document.createElement('span');a.textContent=label;b.textContent=value;row.append(a,b);box.append(row);}
-   for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
+   for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!contactEnabled(String(info.char.id))||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
    return {core,info,cloud};
   }catch{const box=root.querySelector('[data-report]');box.hidden=false;box.textContent='检查未完成，请刷新页面后再试。';for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;return {};}
   finally{button.disabled=false;}
@@ -318,9 +397,9 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  async function testOnce(root,mode='send'){
   if(trial?.busy||ticking){note('已有一次检查正在处理，请等它结束后再试。');return;}
   const {core,info}=await inspect(root);
-  if(!active||!core||!info||!cfg.enabled||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
+  if(!active||!core||!info||!cfg.enabled||!contactEnabled(String(info.char.id))||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
   if(pending.has(info.key)||core.state.aiRequestState?.typingStatus?.[info.conv.id]){note('这个角色还有请求未结束，请稍后再试。');return;}
-  trial={key:info.key,mode,busy:true,requests:0,phase:'starting',preview:'',message:'正在读取 '+info.char.name+' 的上下文…'};paintTrial();
+  trial={key:info.key,legacyKey:info.legacyKey,contactId:String(info.char.id),mode,busy:true,requests:0,phase:'starting',preview:'',message:'正在读取 '+info.char.name+' 的上下文…'};paintTrial();
   const before=new Set((core.state.messages?.[info.conv.id]||[]).map(m=>m.id));
   const slow=setTimeout(()=>{if(trial?.busy){trial.message='本次处理超过 90 秒，仍在等待原系统。请勿重复点击；可以查看 API 服务商的请求记录。';paintTrial();}},90000);
   try{
@@ -342,21 +421,24 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   const root=document.createElement('section');root.dataset.naturalInitiative='';
   const toggle=(key,label)=>'<label class="ni-switch"><input type="checkbox" role="switch" data-key="'+key+'" aria-label="'+label+'"><span></span></label>';
   root.innerHTML='<style>'+css+'</style><header class="ni-top"><div class="ni-icon">'+icon('sun')+'</div><div><h3>自然主动</h3><p class="ni-sub">有话再说，没话就安静</p></div><span class="ni-version">v'+VERSION+'</span></header>'+
-  '<div class="ni-card ni-row"><div><h4>启用自然主动</h4><p class="ni-hint">让每次开口，都有一点缘由</p></div>'+toggle('enabled','启用自然主动')+'</div>'+
+  '<div class="ni-card ni-row"><div><h4>自然主动总开关</h4><p class="ni-hint">统一控制插件是否运行</p></div>'+toggle('enabled','启用自然主动')+'</div>'+
+  '<div class="ni-card"><h4>联系人独立开关</h4><select data-contact-target aria-label="选择自然主动联系人" disabled></select><div class="ni-row ni-divider"><p class="ni-label">对这个 char 启用</p><label class="ni-switch"><input type="checkbox" role="switch" data-contact-enabled aria-label="对所选联系人启用自然主动" disabled><span></span></label></div><p class="ni-hint" data-contact-note></p><p class="ni-hint">每位联系人单独保存。普通模式、真人模式和测试都按这个开关生效。关闭后沿用该联系人的系统漫谈设置。</p></div>'+
   '<div class="ni-card"><h4>相处节奏</h4><div class="ni-segment" role="group" aria-label="主动模式"><button type="button" data-mode="normal">普通模式</button><button type="button" data-mode="realistic">真人模式</button></div><p class="ni-mode-note" data-mode-note></p><div data-normal><div class="ni-timing"><label class="ni-num"><input type="number" data-key="min" min="5" max="720" aria-label="最短冷却分钟"><span>分钟</span></label><span class="ni-dash">至</span><label class="ni-num"><input type="number" data-key="max" min="5" max="1440" aria-label="最长冷却分钟"><span>分钟</span></label></div><p class="ni-hint">一次主动后，随机安静这么久</p></div><div class="ni-row ni-divider"><div><p class="ni-label">留一点空间</p><p class="ni-hint">你没回复时，最多主动几轮</p></div><label class="ni-num ni-limit"><input type="number" data-key="unanswered" min="1" max="5" aria-label="未回复最多主动轮数"><span>轮</span></label></div><div class="ni-row ni-divider"><div><p class="ni-label">日常小分享</p><p class="ni-hint">依据人设与场景，延伸生活小事</p></div>'+toggle('sharing','允许日常小分享')+'</div></div>'+
   '<div class="ni-card"><div class="ni-row"><div><h4 class="ni-quiet-title">'+icon('moon')+' 勿扰时间</h4><p class="ni-hint">按这台设备的时间，留一段安静</p></div>'+toggle('quiet','启用勿扰时间')+'</div><div data-quiet-body><div data-periods></div><button type="button" class="ni-add" data-add>＋ 新增时段</button><p class="ni-hint">支持跨午夜；起止相同表示全天勿扰</p></div></div>'+
   '<div class="ni-card" data-enabled="true"><div class="ni-row"><h4>检查与测试</h4><span class="ni-meta" data-count>已识别 '+matched+' 次检查</span></div><div class="ni-status"><i class="ni-dot"></i><p data-state aria-live="polite"></p></div><select data-target aria-label="选择试运行角色" hidden></select><div class="ni-report" data-report hidden></div><div class="ni-actions"><button type="button" class="ni-btn" data-inspect>检查接入 · 免费</button><button type="button" class="ni-btn ni-primary" data-test disabled>测试发一条</button></div><p class="ni-hint">明确要求模型生成一条文字，直接发到所选角色聊天。<br>会调用你的聊天模型，可能计费；不自动重试。</p><button type="button" class="ni-decision" data-decision disabled>模拟自然判断 · 可能保持安静</button><div class="ni-trial" data-trial role="status" hidden></div><details class="ni-help ni-response" data-response hidden><summary>本次模型返回 · 最多600字</summary><pre data-response-text></pre></details></div>'+
-  '<details class="ni-help"><summary>怎么测试？</summary><p>① 打开此处总开关，保留角色原来的“启用漫谈”。点“检查接入”，选择要测试的角色。</p><p>② 点“测试发一条”：本轮明确要求模型按角色人设、已有聊天生成一句话，用来检查消息能否真正出现在聊天中。只在这次测试跳过是否开口的判断，日常模式仍可安静。若模型未按要求输出，会显示失败原因，并可展开查看本次返回。</p><p>③ “模拟自然判断”使用日常规则，允许沉默。它用于观察此刻有没有开口动机；也会调用模型，可能计费。明确沉默、空白、重复过滤、格式错误会分别显示。</p><p>④ 想验证日常效果，开启真人模式，退出聊天到小手机首页，保持网页运行。首次通常留出15～45分钟，再结合上下文决定是否开口；观察它是否承接前文，有没有反复追问。一次发送测试不能验证长期节奏。</p><p>⑤ 想验证勿扰，新增一段覆盖当前时间的时段并开启勿扰，再检查接入，应提示“当前勿扰”。结束后删除测试时段。</p></details>'+
+  '<details class="ni-help"><summary>怎么测试？</summary><p>① 打开总开关，在“联系人独立开关”选择 char 并开启，保留角色原来的“启用漫谈”。点“检查接入”。</p><p>② 点“测试发一条”：本轮明确要求模型按角色人设、已有聊天生成一句话，用来检查消息能否真正出现在聊天中。只在这次测试跳过是否开口的判断，日常模式仍可安静。若模型未按要求输出，会显示失败原因，并可展开查看本次返回。</p><p>③ “模拟自然判断”使用日常规则，允许沉默。它用于观察此刻有没有开口动机；也会调用模型，可能计费。明确沉默、空白、重复过滤、格式错误会分别显示。</p><p>④ 想验证日常效果，开启真人模式，退出聊天到小手机首页，保持网页运行。首次通常留出15～45分钟，再结合上下文决定是否开口；观察它是否承接前文，有没有反复追问。一次发送测试不能验证长期节奏。</p><p>⑤ 想验证勿扰，新增一段覆盖当前时间的时段并开启勿扰，再检查接入，应提示“当前勿扰”。结束后删除测试时段。</p></details>'+
   '<details class="ni-help"><summary>运行与计费说明</summary><p>沿用原后台私聊的上下文和 API。模型判断与生成合并在一次调用中；选择安静也可能计费。免费检查不会调用聊天模型。</p><p>真人模式需要已适配的网页版与多窗口协调功能。网页被挂起或关闭时，本地调度暂停；已有云端任务不受本页控制，单次试运行可在云端开关开启时使用；日常真人调度需先关闭系统云端定时。</p><p>设置自动保存。关闭上方总开关立即恢复原系统行为；从插件管理禁用或卸载后请刷新页面。</p></details><p class="ni-footer">设置自动保存 · 只保存在当前浏览器</p>';
   root.querySelector('[data-add]').onclick=()=>{if(cfg.periods.length>=12)return;cfg.periods.push({start:'13:00',end:'14:00'});save();paintPeriods();};
-  const changed=()=>{normalize();save();syncPanels();note(cfg.enabled?'设置已保存，等待下一次开口机会。':'自然主动已关闭，请打开上方总开关。');};
+  const changed=()=>{normalize();save();syncPanels();for(const panel of panels)paintContact(panel);note(cfg.enabled?'设置已保存，等待下一次开口机会。':'自然主动已关闭，请打开上方总开关。');};
   for(const el of root.querySelectorAll('[data-key]'))el.addEventListener('change',()=>{const key=el.dataset.key;cfg[key]=el.type==='checkbox'?el.checked:Number(el.value);changed();});
   for(const el of root.querySelectorAll('[data-mode]'))el.onclick=()=>{cfg.realistic=el.dataset.mode==='realistic';changed();};
   root.querySelector('[data-inspect]').onclick=()=>inspect(root);
   root.querySelector('[data-target]').onchange=()=>inspect(root);
+  root.querySelector('[data-contact-target]').onchange=()=>{paintContact(root);inspect(root);};
+  root.querySelector('[data-contact-enabled]').onchange=event=>setContactEnabled(root.querySelector('[data-contact-target]').value,event.target.checked);
   root.querySelector('[data-test]').onclick=()=>testOnce(root);
   root.querySelector('[data-decision]').onclick=()=>testOnce(root,'decision');
-  panels.add(root);syncPanels();paintPeriods();paintTrial();root.querySelector('[data-state]').textContent=cfg.enabled?last:'自然主动已关闭，请打开上方总开关。';return root;
+  panels.add(root);syncPanels();paintPeriods();paintTrial();paintContact(root);root.querySelector('[data-state]').textContent=cfg.enabled?last:'自然主动已关闭，请打开上方总开关。';inspect(root);return root;
  }
  function syncPanels(){for(const root of panels){for(const input of root.querySelectorAll('[data-key]')){const key=input.dataset.key;if(input.type==='checkbox')input.checked=cfg[key];else input.value=cfg[key];}for(const button of root.querySelectorAll('[data-mode]'))button.setAttribute('aria-pressed',String((button.dataset.mode==='realistic')===cfg.realistic));root.querySelector('[data-normal]').hidden=cfg.realistic;root.querySelector('[data-mode-note]').textContent=cfg.realistic?'让角色根据上下文和生活日程，决定下次适合开口的机会。':'沿用原系统的检查时机，有话才说；发过消息后，给彼此留一点空隙。';root.querySelector('[data-quiet-body]').hidden=!cfg.quiet;root.querySelector('[data-enabled]').dataset.enabled=cfg.enabled;for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;root.querySelector('[data-report]').hidden=true;}}
  function paintPeriods(){for(const p of panels){const box=p.querySelector('[data-periods]');box.replaceChildren();cfg.periods.forEach((range,index)=>{const row=document.createElement('div');row.className='ni-period';for(const key of ['start','end']){const input=document.createElement('input');input.type='time';input.value=range[key];input.setAttribute('aria-label','勿扰时段'+(index+1)+(key==='start'?'开始':'结束'));input.onchange=()=>{if(minute(input.value)===null)return;range[key]=input.value;save();for(const panel of panels)for(const button of panel.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;paintPeriods();};row.append(input);if(key==='start'){const dash=document.createElement('span');dash.className='ni-dash';dash.textContent='—';row.append(dash);}}const remove=document.createElement('button');remove.type='button';remove.className='ni-remove';remove.textContent='×';remove.setAttribute('aria-label','删除勿扰时段'+(index+1));remove.onclick=()=>{cfg.periods.splice(index,1);save();for(const panel of panels)for(const button of panel.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;paintPeriods();};row.append(remove);box.append(row);});p.querySelector('[data-add]').disabled=cfg.periods.length>=12;}}
@@ -371,5 +453,5 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  observer=new MutationObserver(()=>{if(queued)return;queued=true;setTimeout(()=>{queued=false;if(active)mountSettings();},200);});
  observer.observe(document.body,{childList:true,subtree:true});mountSettings();
  window.RochePlugin.register({id:'roche-natural-initiative',name:'自然主动',version:VERSION,apps:[{id:'roche-natural-initiative-settings',name:'自然主动',icon:'chat_bubble_outline',mount(container){container.replaceChildren(panel());},unmount(container){for(const p of panels)if(container.contains(p))panels.delete(p);container.replaceChildren();}}]});
-  window.RocheNaturalInitiative={getStatus:()=>({version:VERSION,enabled:cfg.enabled,realistic:cfg.realistic,adaptiveSupported:!!bridge,build:bridge?.build||'',connection:bridgeDetail,matched,status:last}),destroy(){active=false;clearInterval(adaptiveTimer);automatic.clear();observer?.disconnect();if(window.fetch===wrapped)window.fetch=original;for(const p of panels)p.remove();panels.clear();}};
+  window.RocheNaturalInitiative={getStatus:()=>({version:VERSION,enabled:cfg.enabled,contacts:{...contactSettings},realistic:cfg.realistic,adaptiveSupported:!!bridge,build:bridge?.build||'',connection:bridgeDetail,matched,status:last}),destroy(){active=false;clearInterval(adaptiveTimer);automatic.clear();window.removeEventListener('storage',onContactStorage);observer?.disconnect();if(window.fetch===wrapped)window.fetch=original;for(const p of panels)p.remove();panels.clear();}};
 })();
