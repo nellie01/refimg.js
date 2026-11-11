@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.9.1
+/* Roche 商城 AI 商品图 v1.10.0
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.9.1',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.10.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -449,6 +449,71 @@
  css.textContent+=' .rmai-action[hidden]{display:none!important}.rmai-native-controls .rmai-link{font-size:11px;font-family:inherit}.rmai-api-card{padding:20px;margin:16px 0;background:#fafafa;border-radius:20px;color:#27272a;font:13px/1.6 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif}.rmai-api-card p{font-size:12px;color:#71717a;margin:10px 0 16px}.rmai-api-card select,.rmai-field input{box-sizing:border-box;display:block;width:100%;padding:12px;margin:8px 0;border:1px solid #e4e4e7;border-radius:10px;background:white;color:#27272a;font:inherit}.rmai-api-card button{border:0;background:transparent;color:#2563eb;font:inherit;padding:8px 12px 8px 0}.rmai-field{display:block;font-size:12px;color:#666;margin:16px 0}.rmai-api-card small{display:block;color:#a1a1aa}.rmai-api-card p{white-space:pre-line}.rmai-api-card button[hidden]{display:none!important}.rmai-api-card button:disabled{opacity:.45;cursor:default}.rmai-category-link{position:relative;z-index:2;flex-shrink:0;margin-left:10px;padding:6px 10px;border:1px solid #e5e5e5;border-radius:8px;background:#fafafa;color:#555;font:11px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer}.rmai-scope-label{display:block;font-size:12px;color:#666;margin:8px 0 12px}.rmai-scope-label select{margin-top:8px}';
  css.textContent=css.textContent.replaceAll('.market-app .rmai',':is(.market-app,.rmai-phone-root) .rmai').replaceAll('.market-app img.rmai',':is(.market-app,.rmai-phone-root) img.rmai');
  css.textContent+=' .rmai-phone-entry{margin-left:auto;margin-right:8px;flex-shrink:0;padding:7px 10px;border:1px solid #e5e5e5;border-radius:9px;background:#fff;color:#444;font:11px -apple-system,BlinkMacSystemFont,sans-serif}.rmai-phone-root .rmai-empty{background:#f5f5f4;color:#999}.rmai-phone-root .rmai-cart{border-radius:10px!important}';
+ // Native TA messages: presentation and local filtering only; never write message records.
+ const smsRoots=new Map(),smsMarks=new Map();
+ function smsMark(el,name){if(!el)return;if(!smsMarks.has(el))smsMarks.set(el,new Set());if(!el.classList.contains(name)){el.classList.add(name);smsMarks.get(el).add(name);}}
+ function smsRelease(root,view){view.title?.remove();if(view.input){view.input.removeEventListener('input',view.filter);view.input.disabled=view.disabled;}for(const [row,hidden]of view.hidden||[])row.hidden=hidden;delete root.dataset.rmaiSms;}
+ function discoverSMS(){
+  for(const [root,view]of smsRoots)if(!root.isConnected){smsRelease(root,view);smsRoots.delete(root);}
+  for(const [el]of smsMarks)if(!el.isConnected)smsMarks.delete(el);
+  const candidates=new Set(document.querySelectorAll('[data-v-3bf3867a].w-full.h-full,[data-v-bce5b84c].w-full.h-full'));
+  for(const el of document.querySelectorAll('input[placeholder="搜索"],.phone-message-html'))for(let vm=el.__vueParentComponent;vm;vm=vm.parent)if(['PhoneMessagesApp','PhoneMessageDetail'].includes(vm.type?.__name)){if(vm.subTree?.el?.nodeType===1)candidates.add(vm.subTree.el);break;}
+  for(const root of candidates){
+   if(!root.closest('.fixed.inset-0.bg-black.overflow-hidden'))continue;
+   const scroll=[...root.children].find(el=>el.classList.contains('overflow-y-auto'));
+   const header=[...root.children].find(el=>el.classList.contains('sticky'));
+   if(!header)continue;
+   const input=root.querySelector('input[placeholder="搜索"]'),list=!!input;
+   if(!list&&!root.querySelector('.phone-message-html')&&!root.hasAttribute('data-v-bce5b84c'))continue;
+   let view=smsRoots.get(root);
+   if(!view){view={hidden:new Map()};smsRoots.set(root,view);root.dataset.rmaiSms=list?'list':'detail';}
+   smsMark(header,'rmai-sms-header');if(scroll)smsMark(scroll,'rmai-sms-scroll');
+   if(list){
+    if(!view.title){view.title=node('h1','rmai-sms-title rmai-owned','信息');header.after(view.title);}
+    const search=input.parentElement?.parentElement;smsMark(search,'rmai-sms-search');
+    if(view.input!==input){if(view.input)view.input.removeEventListener('input',view.filter);view.input=input;view.disabled=input.disabled;input.disabled=false;
+     view.filter=()=>{const value=input.value.trim().toLocaleLowerCase();for(const row of scroll?.children||[]){if(!row.classList.contains('rmai-sms-row'))continue;if(!view.hidden.has(row))view.hidden.set(row,row.hidden);row.hidden=view.hidden.get(row)||!!value&&!row.textContent.toLocaleLowerCase().includes(value);}};input.addEventListener('input',view.filter);
+    }
+    for(const row of scroll?.children||[]){if(!row.classList.contains('cursor-pointer'))continue;smsMark(row,'rmai-sms-row');const avatar=row.children[0],body=row.children[1];if(!body)continue;smsMark(avatar,'rmai-sms-avatar');smsMark(body,'rmai-sms-body');smsMark(body.children[0],'rmai-sms-meta');smsMark(body.children[1],'rmai-sms-preview');}
+    for(const [row]of view.hidden)if(!row.isConnected)view.hidden.delete(row);
+    if(input.value)view.filter();
+   }
+  }
+ }
+ css.textContent+=`
+ [data-rmai-sms]{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;background:#fff!important;color:#111}
+ [data-rmai-sms=list]>.rmai-sms-header{border:0!important;background:#fff!important;box-shadow:none!important}
+ [data-rmai-sms=list]>.rmai-sms-header>.pointer-events-none{display:none!important}
+ .rmai-sms-title{margin:0!important;padding:5px 20px 13px!important;font-size:34px!important;line-height:1.15!important;font-weight:750!important;letter-spacing:-1px!important;flex-shrink:0}
+ [data-rmai-sms=list]>.rmai-sms-search{padding:0 18px 12px!important;border:0!important;position:relative!important;top:auto!important;background:white!important;flex-shrink:0}
+ .rmai-sms-search>div{height:38px!important;border-radius:12px!important;background:#f0f0f2!important;padding:0 9px!important}
+ .rmai-sms-search input{font-size:16px!important;min-width:0}
+ .rmai-sms-search .material-symbols-outlined{font-size:0!important;width:20px;height:22px;flex:0 0 20px;margin:0 7px 0 2px!important;position:relative}
+ .rmai-sms-search .material-symbols-outlined:before{content:'';position:absolute;width:11px;height:11px;border:2px solid #85858b;border-radius:50%;top:2px;left:1px}
+ .rmai-sms-search .material-symbols-outlined:after{content:'';position:absolute;width:7px;height:2px;background:#85858b;transform:rotate(45deg);top:16px;left:12px}
+ [data-rmai-sms=list]>.rmai-sms-scroll{padding:0 0 calc(env(safe-area-inset-bottom,0px) + 20px)!important}
+ .rmai-sms-row{padding:16px 18px!important;gap:13px!important;align-items:flex-start!important;min-height:99px;position:relative!important}
+ .rmai-sms-row[hidden]{display:none!important}
+ .rmai-sms-avatar{width:49px!important;height:49px!important;margin-top:3px!important;flex-shrink:0;border-radius:50%!important;background:linear-gradient(145deg,#b8c6df,#818caf)!important;color:white!important;font-size:17px!important;font-weight:600!important;letter-spacing:-.5px}
+ .rmai-sms-body{margin:0!important;padding:0!important;border:0!important;gap:4px!important;min-width:0!important;position:static!important}
+ .rmai-sms-body:after{content:'';position:absolute;bottom:0;left:80px;right:18px;border-bottom:1px solid #e8e8eb}
+ .rmai-sms-row:last-child .rmai-sms-body:after{display:none}
+ .rmai-sms-meta{padding:0!important;gap:8px!important;align-items:baseline!important}
+ .rmai-sms-meta>span:first-child{font-size:17px!important;font-weight:650!important;letter-spacing:-.25px;line-height:1.35!important;min-width:0!important;padding:0!important}
+ .rmai-sms-meta>span:last-child{font-size:13px!important;line-height:1.3!important;color:#909095!important;flex-shrink:0;margin-right:15px}
+ .rmai-sms-preview{padding:0!important;gap:8px!important;align-items:flex-start!important}
+ .rmai-sms-preview>span:first-child{font-size:15px!important;line-height:1.45!important;color:#8a8a90!important;white-space:normal!important;display:-webkit-box!important;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden!important;padding:0!important;overflow-wrap:anywhere}
+ .rmai-sms-preview>.material-symbols-outlined{font-size:0!important;position:absolute;right:18px;top:15px;width:9px;color:#c6c6ca!important}
+ .rmai-sms-preview>.material-symbols-outlined:after{content:'›';font:23px/1 Arial,sans-serif;color:#c6c6ca}
+ [data-rmai-sms=detail]>.rmai-sms-header{border-color:#ededf0!important;background:#fafafcf5!important;padding-bottom:9px!important}
+ [data-rmai-sms=detail]>.rmai-sms-scroll{padding:18px 14px 28px!important}
+ [data-rmai-sms=detail] .phone-message-html{font-size:16px!important;line-height:1.45!important;padding:10px 14px!important;overflow-wrap:anywhere}
+ [data-rmai-sms=detail] .phone-message-html p{margin:0!important}
+ `;
+ const smsObserver=new MutationObserver(changes=>{if(stopped)return;const hints='[data-v-3bf3867a].h-full,[data-v-bce5b84c].h-full,input[placeholder="搜索"],.phone-message-html';if(changes.some(change=>change.target.closest?.('[data-rmai-sms]')||[...change.addedNodes].some(el=>el.nodeType===1&&(el.matches(hints)||el.querySelector(hints)))||[...smsRoots.keys()].some(root=>!root.isConnected)))discoverSMS();});
+ smsObserver.observe(document.body,{childList:true,subtree:true});discoverSMS();
+ function removeSMS(){smsObserver.disconnect();for(const [root,view]of smsRoots)smsRelease(root,view);smsRoots.clear();for(const [el,names]of smsMarks)for(const name of names)el.classList.remove(name);smsMarks.clear();}
+
  function note(r,s){r.note.textContent=s;}
  async function paint(r){if(stopped||!r.img.isConnected)return;const j=effectiveJob(r),queued=pending.has(r.key),active=activeTask?.key===r.key;note(r,active&&activeTask.phase==='lock'?'等待其他生图任务':j?.status==='running'?'生成中…':queued?(batchPaused?'队列已暂停':'已排队'):j?.status==='unknown'?'结果待确认':j?.status==='failed'?'生图失败 · 设置中查看':j?.hasImage?'正在载入图片…':'待配图');if(j?.hasImage&&r.near){const key=r.key,src=await imageUrl(key);if(stopped||r.key!==key||!r.near||!r.img.isConnected||!src)return;r.img.onload=()=>{if(!stopped&&r.near)r.wrap.classList.add('rmai-ready');};r.img.onerror=()=>{r.wrap.classList.remove('rmai-ready');note(r,'图片暂时无法显示');};if(r.img.getAttribute('src')!==src)r.img.src=src;if(r.img.complete&&r.img.naturalWidth)r.wrap.classList.add('rmai-ready');}}
  function paintKey(key){for(const r of records)if(r.key===key)paint(r).catch(()=>note(r,'图片缓存暂不可用'));tool();}
@@ -557,8 +622,8 @@
  }
  async function itemPanel(r){const box=sheet(r.title),j=effectiveJob(r);previewKey=r.key;if(j?.hasImage){try{const src=await imageUrl(r.key);if(src&&box.isConnected){const im=node('img');im.src=src;im.alt=r.title;box.append(im);}}catch{}}if(!box.isConnected)return;box.append(node('p','',providerLabel()+'。提示词只包含商品资料，不额外调用聊天模型。'));if(j?.error)box.append(node('p','',j.error));if(j?.status==='unknown')box.append(node('p','','上次任务可能已经产生费用，但本机没有确认结果。请先查看生图后台，再决定是否重新生成。'));const input=node('textarea');input.setAttribute('aria-label','商品图片提示词');input.placeholder='正在整理商品资料…';box.append(input);promptFor(r).then(p=>{if(box.isConnected&&!input.value)input.value=p;}).catch(()=>{if(box.isConnected)input.placeholder='请填写商品图描述';});const act=button(j?.hasImage?'重新生成一张 · 可能计费':'生成这一件 · 可能计费',()=>{enqueue(r,input.value,true,!!j?.hasImage);close();},'rmai-action rmai-primary');act.disabled=j?.status==='running';box.append(act);}
  const observer=new MutationObserver(ms=>{if(ms.some(m=>!m.target.closest?.('.rmai-owned')&&(m.type==='attributes'||[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned')))))schedule(ms.some(m=>m.type==='childList'&&!m.target.closest?.('.rmai-owned')&&[...m.addedNodes,...m.removedNodes].some(n=>n.nodeType===1&&!n.closest?.('.rmai-owned'))));});document.addEventListener('click',onCategoryNavigation,true);observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
- window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;for(const [root,entry]of phoneEntries){entry.currencyObserver.disconnect();entry.button.remove();root.classList.remove('rmai-phone-root');}phoneEntries.clear();restorePhoneCurrency();removeGiftBridge();clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy&&!giftBusy)db?.close();}};
- try{window.RochePlugin?.register({id:ID,name:'商城 AI 商品图 · 独立生图接口',version:VERSION});}catch{}
+ window.RocheMarketPhotos={version:VERSION,destroy(){stopped=true;removeSMS();for(const [root,entry]of phoneEntries){entry.currencyObserver.disconnect();entry.button.remove();root.classList.remove('rmai-phone-root');}phoneEntries.clear();restorePhoneCurrency();removeGiftBridge();clearInterval(giftTimer);clearTimeout(scanTimer);clearTimeout(unloadTimer);clearInterval(heartbeat);cleanupHost();document.removeEventListener('click',onCategoryNavigation,true);for(const entry of categoryEntries.values())entry.button.remove();categoryEntries.clear();observer.disconnect();near.disconnect();pending.clear();close();bindingCard?.remove();css.remove();for(const entry of menuEntries.values())entry.remove();for(const [panel,view]of nativePanels){panel.removeEventListener('input',view.onInput);panel.classList.remove('rmai-native-panel');view.box.remove();}menuEntries.clear();nativePanels.clear();for(const r of records){r.img.onload=r.img.onerror=null;r.img.src=r.original;r.img.classList.remove('rmai-image');for(const attr of ['alt','loading','decoding']){if(r[attr]===null)r.img.removeAttribute(attr);else r.img.setAttribute(attr,r[attr]);}r.wrap.classList.remove('rmai-media','rmai-home','rmai-eats','rmai-detail','rmai-ready','rmai-cart');r.empty.remove();}for(const a of images.values())if(a.object)URL.revokeObjectURL(a.url);images.clear();records.clear();if(!working&&!hostBusy&&!giftBusy)db?.close();}};
+ try{window.RochePlugin?.register({id:ID,name:'TA 手机美化 · 商城商品图与短信',version:VERSION});}catch{}
  discover();
  (async()=>{try{db=await database();if(stopped){db.close();return;}const savedHostProblems=await read('settings','hostProblems');if(savedHostProblems?.items)hostProblems=savedHostProblems.items;const savedValidation=await read('settings','validation');if(savedValidation)validation=savedValidation;if(['checking','generating','queued'].includes(validation.state))validation={...validation,state:'unverified',message:'上次验证没有确认结果，请先查看服务商记录，不会自动重新生图。'};const savedProvider=await read('settings','provider');if(savedProvider&&['system','preset','custom'].includes(savedProvider.source))provider={...provider,...savedProvider};for(const j of await read('jobs')){jobs.set(j.key,j.status==='running'&&j.owner!==owner?{...j,status:'unknown',error:'页面曾在生图时关闭或刷新。上次任务结果未确认，不会自动重新调用。'}:j);}for(const p of await productRows()){const k=rowKey(p);known.add(normal(p.title));seenProducts.add(k);}if(stopped){db.close();return;}preferences();ready=true;initGiftVision();fillBindingOptions();for(const r of records){r.isNew=false;paint(r).catch(()=>{});near.observe(r.img);}schedule();}catch(error){panelMessage=String(error?.message||'图片缓存不可用');for(const r of records)note(r,'图片缓存暂不可用');tool();}})();
 })();
