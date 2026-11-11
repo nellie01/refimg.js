@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.10.2
+/* Roche 商城 AI 商品图 v1.10.3
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.10.2',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.10.3',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -543,10 +543,12 @@
  .rmai-sms-message{max-width:88%!important;display:flex!important;flex-direction:column;align-items:flex-start;position:relative;min-width:0}
  .rmai-sms-message.rmai-sms-outgoing{align-items:flex-end}
  .rmai-sms-message>svg{display:none!important}
- [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;min-width:0!important;white-space:pre-wrap!important;word-break:normal!important;overflow-wrap:anywhere!important;position:relative;font:400 16px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#fffffff0!important;color:#101010!important;margin:0!important;box-shadow:none!important}
+ [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;min-width:0!important;white-space:pre-wrap!important;word-break:normal!important;overflow-wrap:anywhere!important;position:relative;font:400 16px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#f5f5f5!important;color:#101010!important;margin:0!important;box-shadow:none!important}
  [data-rmai-sms=detail] .rmai-sms-outgoing>.phone-message-html{background:#0787ff!important;color:white!important}
- .rmai-sms-message>.phone-message-html:after{content:'';position:absolute;left:-4px;bottom:0;width:11px;height:12px;background:inherit;clip-path:path('M 11 0 C 11 6 8 9 0 10 C 4 12 9 11 11 9 Z')}
- .rmai-sms-outgoing>.phone-message-html:after{left:auto;right:-4px;transform:scaleX(-1)}
+ .rmai-sms-message:not(.rmai-sms-outgoing)>.phone-message-html{border-bottom-left-radius:7px!important}
+ [data-rmai-sms=detail] .rmai-sms-outgoing>.phone-message-html{border-bottom-right-radius:7px!important}
+ .rmai-sms-message>.phone-message-html:after{content:'';position:absolute;left:-6px;bottom:0;width:14px;height:16px;background:inherit;clip-path:path('M 14 16 C 10 16 7 14 0 14 C 4 14 7 10 7 7 V 0 C 7 0 14 0 14 16 Z')}
+ .rmai-sms-outgoing>.phone-message-html:after{left:auto;right:-6px;transform:scaleX(-1)}
  [data-rmai-sms=detail] .phone-translation-block,[data-rmai-sms=detail] .phone-translation-toggle{display:none!important}
  [data-rmai-sms=detail] .phone-message-html br:has(+.phone-translation-block){display:none}
  .rmai-sms-translation{max-width:100%;margin:2px 6px 3px;color:#172348;font:600 13px/1.4 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;pointer-events:none}
