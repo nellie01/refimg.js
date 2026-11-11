@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.10.0
+/* Roche 商城 AI 商品图 v1.10.1
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.10.0',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.10.1',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -452,7 +452,25 @@
  // Native TA messages: presentation and local filtering only; never write message records.
  const smsRoots=new Map(),smsMarks=new Map();
  function smsMark(el,name){if(!el)return;if(!smsMarks.has(el))smsMarks.set(el,new Set());if(!el.classList.contains(name)){el.classList.add(name);smsMarks.get(el).add(name);}}
- function smsRelease(root,view){view.title?.remove();if(view.input){view.input.removeEventListener('input',view.filter);view.input.disabled=view.disabled;}for(const [row,hidden]of view.hidden||[])row.hidden=hidden;delete root.dataset.rmaiSms;}
+ function smsRelease(root,view){view.title?.remove();view.appearance?.remove();for(const copy of view.translations?.values()||[])copy.remove();root.style.removeProperty('--rmai-sms-wallpaper');if(view.input){view.input.removeEventListener('input',view.filter);view.input.disabled=view.disabled;}for(const [row,hidden]of view.hidden||[])row.hidden=hidden;delete root.dataset.rmaiSms;}
+ function smsWallpaper(root){const value=pref.smsWallpaper;if(value){try{const url=new URL(value);if(url.protocol==='https:'&&!url.username&&!url.password)root.style.setProperty('--rmai-sms-wallpaper','url('+JSON.stringify(url.href)+')');}catch{}}else root.style.removeProperty('--rmai-sms-wallpaper');}
+ function smsAppearance(){const box=sheet('短信外观'),label=node('label','','背景图片直链'),input=node('input'),note=node('p','','填写 HTTPS 图片直链后，会用在 TA 的短信会话页。留空使用默认背景。');input.type='url';input.placeholder='https://…';input.value=pref.smsWallpaper||'';input.setAttribute('aria-label','短信背景图片直链');label.append(input);box.append(label,note,button('保存背景',()=>{const value=input.value.trim();try{if(value){const url=new URL(value);if(url.protocol!=='https:'||url.username||url.password)throw Error();}pref.smsWallpaper=value;preferences();for(const [root]of smsRoots)if(root.dataset.rmaiSms==='detail')smsWallpaper(root);setText(note,'背景已保存。');}catch{setText(note,'请填写有效的 HTTPS 图片直链。');}},'rmai-action rmai-primary'));}
+ function smsDetail(root,view,header,scroll){
+  smsWallpaper(root);
+  const person=[...header.children].find(el=>el.classList.contains('flex-col'));smsMark(person,'rmai-sms-person');if(person){smsMark(person.children[0],'rmai-sms-person-avatar');smsMark(person.children[1],'rmai-sms-person-name');}
+  if(!view.appearance){view.appearance=button('···',smsAppearance,'rmai-sms-appearance rmai-owned');view.appearance.setAttribute('aria-label','短信外观');header.append(view.appearance);}
+  const footer=[...root.children].find(el=>el!==header&&el!==scroll&&el.querySelector('.rounded-full')&&el.querySelector('button'));smsMark(footer,'rmai-sms-footer');
+  view.translations||=new Map();
+  for(const [bubble,copy]of view.translations)if(!bubble.isConnected){copy.remove();view.translations.delete(bubble);}
+  for(const bubble of scroll?.querySelectorAll('.phone-message-html')||[]){
+   const wrap=bubble.parentElement;if(!wrap||wrap===scroll)continue;
+   smsMark(wrap,'rmai-sms-message');if(bubble.classList.contains('text-white'))smsMark(wrap,'rmai-sms-outgoing');
+   const sources=[...bubble.querySelectorAll('.phone-translation-content')];
+   if(!sources.length){view.translations.get(bubble)?.remove();view.translations.delete(bubble);continue;}
+   let copy=view.translations.get(bubble);if(!copy){copy=node('div','rmai-sms-translation rmai-owned');view.translations.set(bubble,copy);bubble.after(copy);}
+   const text=sources.map(source=>[...source.childNodes].map(child=>child.nodeName==='BR'?'\n':child.textContent).join('').trim()).join('\n');setText(copy,text);
+  }
+ }
  function discoverSMS(){
   for(const [root,view]of smsRoots)if(!root.isConnected){smsRelease(root,view);smsRoots.delete(root);}
   for(const [el]of smsMarks)if(!el.isConnected)smsMarks.delete(el);
@@ -477,14 +495,14 @@
     for(const row of scroll?.children||[]){if(!row.classList.contains('cursor-pointer'))continue;smsMark(row,'rmai-sms-row');const avatar=row.children[0],body=row.children[1];if(!body)continue;smsMark(avatar,'rmai-sms-avatar');smsMark(body,'rmai-sms-body');smsMark(body.children[0],'rmai-sms-meta');smsMark(body.children[1],'rmai-sms-preview');}
     for(const [row]of view.hidden)if(!row.isConnected)view.hidden.delete(row);
     if(input.value)view.filter();
-   }
+   }else smsDetail(root,view,header,scroll);
   }
  }
  css.textContent+=`
  [data-rmai-sms]{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;background:#fff!important;color:#111}
  [data-rmai-sms=list]>.rmai-sms-header{border:0!important;background:#fff!important;box-shadow:none!important}
  [data-rmai-sms=list]>.rmai-sms-header>.pointer-events-none{display:none!important}
- .rmai-sms-title{margin:0!important;padding:5px 20px 13px!important;font-size:34px!important;line-height:1.15!important;font-weight:750!important;letter-spacing:-1px!important;flex-shrink:0}
+ .rmai-sms-title{margin:0!important;padding:0 18px 10px!important;font-size:30px!important;line-height:1.15!important;font-weight:750!important;letter-spacing:-1px!important;flex-shrink:0}
  [data-rmai-sms=list]>.rmai-sms-search{padding:0 18px 12px!important;border:0!important;position:relative!important;top:auto!important;background:white!important;flex-shrink:0}
  .rmai-sms-search>div{height:38px!important;border-radius:12px!important;background:#f0f0f2!important;padding:0 9px!important}
  .rmai-sms-search input{font-size:16px!important;min-width:0}
@@ -492,23 +510,50 @@
  .rmai-sms-search .material-symbols-outlined:before{content:'';position:absolute;width:11px;height:11px;border:2px solid #85858b;border-radius:50%;top:2px;left:1px}
  .rmai-sms-search .material-symbols-outlined:after{content:'';position:absolute;width:7px;height:2px;background:#85858b;transform:rotate(45deg);top:16px;left:12px}
  [data-rmai-sms=list]>.rmai-sms-scroll{padding:0 0 calc(env(safe-area-inset-bottom,0px) + 20px)!important}
- .rmai-sms-row{padding:16px 18px!important;gap:13px!important;align-items:flex-start!important;min-height:99px;position:relative!important}
+ .rmai-sms-row{padding:11px 17px!important;gap:11px!important;align-items:center!important;min-height:0!important;position:relative!important}
  .rmai-sms-row[hidden]{display:none!important}
- .rmai-sms-avatar{width:49px!important;height:49px!important;margin-top:3px!important;flex-shrink:0;border-radius:50%!important;background:linear-gradient(145deg,#b8c6df,#818caf)!important;color:white!important;font-size:17px!important;font-weight:600!important;letter-spacing:-.5px}
+ .rmai-sms-avatar{width:43px!important;height:43px!important;margin-top:0!important;flex-shrink:0;border-radius:50%!important;background:linear-gradient(145deg,#b8c6df,#818caf)!important;color:white!important;font-size:15px!important;font-weight:600!important;letter-spacing:-.5px}
  .rmai-sms-body{margin:0!important;padding:0!important;border:0!important;gap:4px!important;min-width:0!important;position:static!important}
- .rmai-sms-body:after{content:'';position:absolute;bottom:0;left:80px;right:18px;border-bottom:1px solid #e8e8eb}
+ .rmai-sms-body:after{content:'';position:absolute;bottom:0;left:71px;right:17px;border-bottom:1px solid #e8e8eb}
  .rmai-sms-row:last-child .rmai-sms-body:after{display:none}
  .rmai-sms-meta{padding:0!important;gap:8px!important;align-items:baseline!important}
- .rmai-sms-meta>span:first-child{font-size:17px!important;font-weight:650!important;letter-spacing:-.25px;line-height:1.35!important;min-width:0!important;padding:0!important}
+ .rmai-sms-meta>span:first-child{font-size:16px!important;font-weight:650!important;letter-spacing:-.25px;line-height:1.3!important;min-width:0!important;padding:0!important}
  .rmai-sms-meta>span:last-child{font-size:13px!important;line-height:1.3!important;color:#909095!important;flex-shrink:0;margin-right:15px}
  .rmai-sms-preview{padding:0!important;gap:8px!important;align-items:flex-start!important}
- .rmai-sms-preview>span:first-child{font-size:15px!important;line-height:1.45!important;color:#8a8a90!important;white-space:normal!important;display:-webkit-box!important;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden!important;padding:0!important;overflow-wrap:anywhere}
- .rmai-sms-preview>.material-symbols-outlined{font-size:0!important;position:absolute;right:18px;top:15px;width:9px;color:#c6c6ca!important}
+ .rmai-sms-preview>span:first-child{font-size:14px!important;line-height:1.35!important;color:#8a8a90!important;white-space:normal!important;display:-webkit-box!important;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden!important;padding:0!important;overflow-wrap:anywhere}
+ .rmai-sms-preview>.material-symbols-outlined{font-size:0!important;position:absolute;right:17px;top:10px;width:9px;color:#c6c6ca!important}
  .rmai-sms-preview>.material-symbols-outlined:after{content:'›';font:23px/1 Arial,sans-serif;color:#c6c6ca}
  [data-rmai-sms=detail]>.rmai-sms-header{border-color:#ededf0!important;background:#fafafcf5!important;padding-bottom:9px!important}
  [data-rmai-sms=detail]>.rmai-sms-scroll{padding:18px 14px 28px!important}
  [data-rmai-sms=detail] .phone-message-html{font-size:16px!important;line-height:1.45!important;padding:10px 14px!important;overflow-wrap:anywhere}
  [data-rmai-sms=detail] .phone-message-html p{margin:0!important}
+ [data-rmai-sms=detail]{background-color:#bdb8a9!important;background-image:var(--rmai-sms-wallpaper,linear-gradient(145deg,#c9c5b8,#aaa591))!important;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important}
+ [data-rmai-sms=detail]>.rmai-sms-header{min-height:104px!important;padding:10px 16px!important;background:transparent!important;border:0!important;box-shadow:none!important;position:relative!important;flex-shrink:0;align-items:center!important}
+ [data-rmai-sms=detail]>.rmai-sms-header>button:first-child{border:1px solid #ffffff8c!important;border-radius:50%!important;background:#ffffffaa!important;backdrop-filter:blur(12px);width:40px!important;height:40px!important;color:#171717!important}
+ .rmai-sms-person{gap:0!important;align-items:center!important;margin:0 auto!important;min-width:0}
+ .rmai-sms-person-avatar{width:54px!important;height:54px!important;font-size:20px!important;border:2px solid #ffffffbd;background:linear-gradient(135deg,#bdc7d5,#818c9f)!important;box-shadow:0 2px 6px #0001}
+ .rmai-sms-person-name{width:auto!important;max-width:180px!important;background:#ffffffbd!important;border:1px solid #ffffffc9!important;border-radius:24px!important;margin-top:-2px!important;padding:6px 13px!important;font-size:16px!important;line-height:1.1!important;font-weight:650!important;color:#111!important;backdrop-filter:blur(12px)}
+ .rmai-sms-person-name:after{content:' ›';color:#777;font-size:20px}
+ .rmai-sms-appearance{position:absolute;right:16px;top:35px;width:40px;height:40px;border:1px solid #ffffff8c;border-radius:50%;background:#ffffffaa;backdrop-filter:blur(12px);color:#222;font:700 18px Arial;cursor:pointer}
+ [data-rmai-sms=detail]>.rmai-sms-scroll{background:transparent!important;padding:12px 16px 24px!important;scrollbar-width:thin}
+ [data-rmai-sms=detail]>.rmai-sms-scroll>.flex.flex-col{margin-bottom:8px!important}
+ .rmai-sms-message{max-width:88%!important;display:flex!important;flex-direction:column;align-items:flex-start;position:relative;min-width:0}
+ .rmai-sms-message.rmai-sms-outgoing{align-items:flex-end}
+ .rmai-sms-message>svg{display:none!important}
+ [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;position:relative;font:400 16px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#fffffff0!important;color:#101010!important;margin:0!important;box-shadow:none!important}
+ [data-rmai-sms=detail] .rmai-sms-outgoing>.phone-message-html{background:#0787ff!important;color:white!important}
+ .rmai-sms-message>.phone-message-html:after{content:'';position:absolute;left:-5px;bottom:0;width:11px;height:12px;background:inherit;clip-path:polygon(100% 0,100% 100%,0 100%,45% 65%)}
+ .rmai-sms-outgoing>.phone-message-html:after{left:auto;right:-5px;transform:scaleX(-1)}
+ [data-rmai-sms=detail] .phone-translation-block,[data-rmai-sms=detail] .phone-translation-toggle{display:none!important}
+ [data-rmai-sms=detail] .phone-message-html br:has(+.phone-translation-block){display:none}
+ .rmai-sms-translation{max-width:100%;margin:2px 6px 3px;color:#172348;font:600 13px/1.4 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;pointer-events:none}
+ .rmai-sms-outgoing>.rmai-sms-translation{text-align:right}
+ [data-rmai-sms=detail] .rmai-sms-scroll>.flex.flex-col>.text-center{font-size:11px!important;color:#fff!important;text-shadow:0 1px 3px #0008;margin:12px 0 18px!important}
+ [data-rmai-sms=detail]>.rmai-sms-footer{border:0!important;background:transparent!important;backdrop-filter:none!important;padding:9px 13px 12px!important;gap:9px!important}
+ .rmai-sms-footer>button:first-child{height:38px;width:38px;flex-shrink:0;border:1px solid #ffffffb5;border-radius:50%;background:#ffffffc9!important;color:#111!important;margin:0!important}
+ .rmai-sms-footer>.flex-1{height:40px!important;border:1px solid #ffffffc9!important;border-radius:24px!important;background:#ffffffc9!important;backdrop-filter:blur(16px);padding:0 13px!important;min-width:0}
+ .rmai-sms-footer>.flex-1>span{font-size:16px!important;color:#909095!important}
+ .rmai-sms-footer>button:last-child{color:#f4f4f4!important;margin:0!important}
  `;
  const smsObserver=new MutationObserver(changes=>{if(stopped)return;const hints='[data-v-3bf3867a].h-full,[data-v-bce5b84c].h-full,input[placeholder="搜索"],.phone-message-html';if(changes.some(change=>change.target.closest?.('[data-rmai-sms]')||[...change.addedNodes].some(el=>el.nodeType===1&&(el.matches(hints)||el.querySelector(hints)))||[...smsRoots.keys()].some(root=>!root.isConnected)))discoverSMS();});
  smsObserver.observe(document.body,{childList:true,subtree:true});discoverSMS();
