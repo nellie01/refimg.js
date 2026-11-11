@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.10.1
+/* Roche 商城 AI 商品图 v1.10.2
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.10.1',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.10.2',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -452,7 +452,8 @@
  // Native TA messages: presentation and local filtering only; never write message records.
  const smsRoots=new Map(),smsMarks=new Map();
  function smsMark(el,name){if(!el)return;if(!smsMarks.has(el))smsMarks.set(el,new Set());if(!el.classList.contains(name)){el.classList.add(name);smsMarks.get(el).add(name);}}
- function smsRelease(root,view){view.title?.remove();view.appearance?.remove();for(const copy of view.translations?.values()||[])copy.remove();root.style.removeProperty('--rmai-sms-wallpaper');if(view.input){view.input.removeEventListener('input',view.filter);view.input.disabled=view.disabled;}for(const [row,hidden]of view.hidden||[])row.hidden=hidden;delete root.dataset.rmaiSms;}
+ function smsTranslationRelease(bubble,copy){bubble.removeEventListener('click',copy.rmaiToggle);bubble.removeEventListener('keydown',copy.rmaiKey);for(const [name,value]of copy.rmaiAttrs||[])if(value===null)bubble.removeAttribute(name);else bubble.setAttribute(name,value);copy.remove();}
+ function smsRelease(root,view){view.title?.remove();view.appearance?.remove();for(const [bubble,copy]of view.translations||[])smsTranslationRelease(bubble,copy);root.style.removeProperty('--rmai-sms-wallpaper');if(view.input){view.input.removeEventListener('input',view.filter);view.input.disabled=view.disabled;}for(const [row,hidden]of view.hidden||[])row.hidden=hidden;delete root.dataset.rmaiSms;}
  function smsWallpaper(root){const value=pref.smsWallpaper;if(value){try{const url=new URL(value);if(url.protocol==='https:'&&!url.username&&!url.password)root.style.setProperty('--rmai-sms-wallpaper','url('+JSON.stringify(url.href)+')');}catch{}}else root.style.removeProperty('--rmai-sms-wallpaper');}
  function smsAppearance(){const box=sheet('短信外观'),label=node('label','','背景图片直链'),input=node('input'),note=node('p','','填写 HTTPS 图片直链后，会用在 TA 的短信会话页。留空使用默认背景。');input.type='url';input.placeholder='https://…';input.value=pref.smsWallpaper||'';input.setAttribute('aria-label','短信背景图片直链');label.append(input);box.append(label,note,button('保存背景',()=>{const value=input.value.trim();try{if(value){const url=new URL(value);if(url.protocol!=='https:'||url.username||url.password)throw Error();}pref.smsWallpaper=value;preferences();for(const [root]of smsRoots)if(root.dataset.rmaiSms==='detail')smsWallpaper(root);setText(note,'背景已保存。');}catch{setText(note,'请填写有效的 HTTPS 图片直链。');}},'rmai-action rmai-primary'));}
  function smsDetail(root,view,header,scroll){
@@ -461,14 +462,16 @@
   if(!view.appearance){view.appearance=button('···',smsAppearance,'rmai-sms-appearance rmai-owned');view.appearance.setAttribute('aria-label','短信外观');header.append(view.appearance);}
   const footer=[...root.children].find(el=>el!==header&&el!==scroll&&el.querySelector('.rounded-full')&&el.querySelector('button'));smsMark(footer,'rmai-sms-footer');
   view.translations||=new Map();
-  for(const [bubble,copy]of view.translations)if(!bubble.isConnected){copy.remove();view.translations.delete(bubble);}
+  for(const [bubble,copy]of view.translations)if(!bubble.isConnected){smsTranslationRelease(bubble,copy);view.translations.delete(bubble);}
   for(const bubble of scroll?.querySelectorAll('.phone-message-html')||[]){
    const wrap=bubble.parentElement;if(!wrap||wrap===scroll)continue;
    smsMark(wrap,'rmai-sms-message');if(bubble.classList.contains('text-white'))smsMark(wrap,'rmai-sms-outgoing');
    const sources=[...bubble.querySelectorAll('.phone-translation-content')];
-   if(!sources.length){view.translations.get(bubble)?.remove();view.translations.delete(bubble);continue;}
-   let copy=view.translations.get(bubble);if(!copy){copy=node('div','rmai-sms-translation rmai-owned');view.translations.set(bubble,copy);bubble.after(copy);}
-   const text=sources.map(source=>[...source.childNodes].map(child=>child.nodeName==='BR'?'\n':child.textContent).join('').trim()).join('\n');setText(copy,text);
+   if(!sources.length){const old=view.translations.get(bubble);if(old)smsTranslationRelease(bubble,old);view.translations.delete(bubble);continue;}
+   let copy=view.translations.get(bubble);if(!copy){copy=node('div','rmai-sms-translation rmai-owned');copy.rmaiAttrs=['role','tabindex','aria-expanded','title'].map(name=>[name,bubble.getAttribute(name)]);copy.rmaiToggle=()=>{if(window.getSelection()?.toString())return;const blocks=[...bubble.querySelectorAll('details.phone-translation-block')],open=!blocks.every(el=>el.open);for(const block of blocks)block.open=open;};copy.rmaiKey=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();copy.rmaiToggle();}};bubble.addEventListener('click',copy.rmaiToggle);bubble.addEventListener('keydown',copy.rmaiKey);bubble.setAttribute('role','button');bubble.setAttribute('tabindex','0');view.translations.set(bubble,copy);bubble.after(copy);}
+   // Roche derives each native details.open from the active contact's translationBubbleExpanded setting.
+   // Mirror that native state; never keep a separate expansion preference or force details open.
+   const visible=sources.filter(source=>source.closest('details.phone-translation-block')?.open),text=visible.map(source=>[...source.childNodes].map(child=>child.nodeName==='BR'?'\n':child.textContent).join('').trim()).join('\n');setText(copy,text);copy.hidden=!visible.length;bubble.setAttribute('aria-expanded',String(!!visible.length));bubble.setAttribute('title',visible.length?'点击收起翻译':'点击展开翻译');
   }
  }
  function discoverSMS(){
@@ -540,14 +543,15 @@
  .rmai-sms-message{max-width:88%!important;display:flex!important;flex-direction:column;align-items:flex-start;position:relative;min-width:0}
  .rmai-sms-message.rmai-sms-outgoing{align-items:flex-end}
  .rmai-sms-message>svg{display:none!important}
- [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;position:relative;font:400 16px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#fffffff0!important;color:#101010!important;margin:0!important;box-shadow:none!important}
+ [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;min-width:0!important;white-space:pre-wrap!important;word-break:normal!important;overflow-wrap:anywhere!important;position:relative;font:400 16px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#fffffff0!important;color:#101010!important;margin:0!important;box-shadow:none!important}
  [data-rmai-sms=detail] .rmai-sms-outgoing>.phone-message-html{background:#0787ff!important;color:white!important}
- .rmai-sms-message>.phone-message-html:after{content:'';position:absolute;left:-5px;bottom:0;width:11px;height:12px;background:inherit;clip-path:polygon(100% 0,100% 100%,0 100%,45% 65%)}
- .rmai-sms-outgoing>.phone-message-html:after{left:auto;right:-5px;transform:scaleX(-1)}
+ .rmai-sms-message>.phone-message-html:after{content:'';position:absolute;left:-4px;bottom:0;width:11px;height:12px;background:inherit;clip-path:path('M 11 0 C 11 6 8 9 0 10 C 4 12 9 11 11 9 Z')}
+ .rmai-sms-outgoing>.phone-message-html:after{left:auto;right:-4px;transform:scaleX(-1)}
  [data-rmai-sms=detail] .phone-translation-block,[data-rmai-sms=detail] .phone-translation-toggle{display:none!important}
  [data-rmai-sms=detail] .phone-message-html br:has(+.phone-translation-block){display:none}
  .rmai-sms-translation{max-width:100%;margin:2px 6px 3px;color:#172348;font:600 13px/1.4 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;pointer-events:none}
  .rmai-sms-outgoing>.rmai-sms-translation{text-align:right}
+ .rmai-sms-translation[hidden]{display:none!important}
  [data-rmai-sms=detail] .rmai-sms-scroll>.flex.flex-col>.text-center{font-size:11px!important;color:#fff!important;text-shadow:0 1px 3px #0008;margin:12px 0 18px!important}
  [data-rmai-sms=detail]>.rmai-sms-footer{border:0!important;background:transparent!important;backdrop-filter:none!important;padding:9px 13px 12px!important;gap:9px!important}
  .rmai-sms-footer>button:first-child{height:38px;width:38px;flex-shrink:0;border:1px solid #ffffffb5;border-radius:50%;background:#ffffffc9!important;color:#111!important;margin:0!important}
@@ -556,7 +560,7 @@
  .rmai-sms-footer>button:last-child{color:#f4f4f4!important;margin:0!important}
  `;
  const smsObserver=new MutationObserver(changes=>{if(stopped)return;const hints='[data-v-3bf3867a].h-full,[data-v-bce5b84c].h-full,input[placeholder="搜索"],.phone-message-html';if(changes.some(change=>change.target.closest?.('[data-rmai-sms]')||[...change.addedNodes].some(el=>el.nodeType===1&&(el.matches(hints)||el.querySelector(hints)))||[...smsRoots.keys()].some(root=>!root.isConnected)))discoverSMS();});
- smsObserver.observe(document.body,{childList:true,subtree:true});discoverSMS();
+ smsObserver.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['open']});discoverSMS();
  function removeSMS(){smsObserver.disconnect();for(const [root,view]of smsRoots)smsRelease(root,view);smsRoots.clear();for(const [el,names]of smsMarks)for(const name of names)el.classList.remove(name);smsMarks.clear();}
 
  function note(r,s){r.note.textContent=s;}
