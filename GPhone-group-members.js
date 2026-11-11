@@ -1,11 +1,78 @@
-/* GPhone · 群聊全员头像 v1.0.0
-   只读取当前群的成员名单与头像，不读消息正文、不改数据、不调用 AI。
+/* GPhone · 群聊全员头像 v1.1.0
+   用本地消息的会话编号定位当前群，再读取成员头像；不分析正文、不改数据、不调用 AI。
    未发言的成员也会显示；头像多时横向滑动。 */
 (() => {
   'use strict';
   window.GPhoneGroupMembers?.stop();
   const id = 'gphone-group-members';
   const views = new Map();
+  const resolved = new WeakMap();
+  const finding = new WeakSet();
+  function anchors(root) {
+    return [...root.querySelectorAll('.chat-scroll-area [id^="msg-"]')].slice(0, 3).map(node => node.id.slice(4));
+  }
+  function messageConversation(keys) {
+    if (!keys.length || !window.indexedDB) return Promise.resolve('');
+    return new Promise(resolve => {
+      let settled = false, db;
+      const finish = value => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); db?.close(); resolve(value);
+      };
+      const timer = setTimeout(() => finish(''), 3000);
+      let request;
+      try { request = indexedDB.open('Roche_db'); } catch { finish(''); return; }
+      request.onupgradeneeded = () => request.transaction.abort();
+      request.onerror = request.onblocked = () => finish('');
+      request.onsuccess = () => {
+        db = request.result;
+        if (settled) { db.close(); return; }
+        if (!db.objectStoreNames.contains('messages')) { finish(''); return; }
+        try {
+          const tx = db.transaction('messages', 'readonly');
+          const ids = new Set();
+          for (const key of keys) {
+            const record = tx.objectStore('messages').get(key);
+            record.onsuccess = () => {
+              const value = record.result?.conversationId;
+              if (value != null && String(value)) ids.add(String(value));
+            };
+          }
+          tx.oncomplete = () => finish(ids.size === 1 ? [...ids][0] : '');
+          tx.onabort = tx.onerror = () => finish('');
+        } catch { finish(''); }
+      };
+    });
+  }
+  async function identify(root) {
+    if (stopped || finding.has(root)) return;
+    const keys = anchors(root);
+    const fingerprint = JSON.stringify(keys);
+    const title = root.querySelector('.chat-header-title')?.textContent.trim() || '';
+    const speakers = [...root.querySelectorAll('.chat-message--received .chat-message-avatar[data-sender-id]')].map(el=>el.dataset.senderId).filter(Boolean);
+    finding.add(root);
+    try {
+      const current = () => !stopped && root.isConnected && JSON.stringify(anchors(root)) === fingerprint;
+      const exact = await messageConversation(keys);
+      if (!current()) return;
+      if (exact) {
+        resolved.set(root,{id:exact,fingerprint});
+        schedule();
+        return;
+      }
+      // A freshly rendered message may not have been persisted yet. Only use
+      // a unique title+roster match with native group-only sender labels.
+      if (!title || !speakers.length || !root.querySelector('.chat-message-sender-name') || !window.Roche?.conversation?.list) return;
+      const groups = await window.Roche.conversation.list({isGroup:true});
+      const matches = groups.filter(group => [group.handle,group.name,group.title,group.displayName].includes(title)
+        && speakers.every(id=>(group.members||[]).map(String).includes(String(id))));
+      if (current() && root.querySelector('.chat-header-title')?.textContent.trim() === title && matches.length === 1) {
+        resolved.set(root,{id:String(matches[0].id),title,speakers:JSON.stringify(speakers),fingerprint});
+        schedule();
+      }
+    } catch(error) { console.warn('[GPhone group members] Roster lookup:',error?.message || error); }
+    finally {finding.delete(root);}
+  }
   let frame = null;
   let stopped = false;
   const style = document.createElement('style');
@@ -43,15 +110,20 @@
   `;
   document.head.append(style);
 
-  // The native Chat component owns the active ID. Never infer it from title
-  // text or recent speakers: two groups can have identical names/members.
+  // Use the exact component ID where available, otherwise persistent message
+  // metadata. A title+roster fallback must identify one group unambiguously.
   function chatId(root) {
     for (let vm = root.__vueParentComponent, depth = 0; vm && depth < 30; vm = vm.parent, depth++) {
       if ((vm.type?.__name === 'Chat' || vm.type?.name === 'Chat') && vm.props?.chatId != null) {
         return String(vm.props.chatId);
       }
     }
-    return '';
+    const match=resolved.get(root);
+    if (!match || match.fingerprint !== JSON.stringify(anchors(root))) return '';
+    if (!Object.hasOwn(match,'title')) return match.id;
+    const title=root.querySelector('.chat-header-title')?.textContent.trim() || '';
+    const speakers=[...root.querySelectorAll('.chat-message--received .chat-message-avatar[data-sender-id]')].map(el=>el.dataset.senderId).filter(Boolean);
+    return match && match.title===title && match.speakers===JSON.stringify(speakers) ? match.id : '';
   }
   function picture(value) {
     if (typeof value !== 'string' || !value.trim()) return '';
@@ -146,7 +218,7 @@
     }
     for (const root of document.querySelectorAll('.chat-viewport-root')) {
       const key = chatId(root);
-      if (!key) continue;
+      if (!key) { identify(root); continue; }
       let view = views.get(root);
       if (!view) { view = {root, id:key, updated:0, loading:false, signature:null, strip:null}; views.set(root, view); }
       if (Date.now() - view.updated >= 4000 || (view.strip && !view.strip.isConnected)) load(view);
@@ -159,7 +231,7 @@
   document.addEventListener('visibilitychange', schedule);
   window.addEventListener('focus', schedule);
   window.GPhoneGroupMembers = {
-    version:'1.0.0',
+    version:'1.1.0',
     refresh() { for (const view of views.values()) view.updated = 0; schedule(); },
     stop() {
       stopped = true;
@@ -171,6 +243,6 @@
       views.clear();style.remove();
     }
   };
-  window.RochePlugin?.register?.({id, name:'GPhone 群聊全员头像', version:'1.0.0', apps:[]});
+  window.RochePlugin?.register?.({id, name:'GPhone 群聊全员头像', version:'1.1.0', apps:[]});
   schedule();
 })();
