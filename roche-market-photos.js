@@ -1,4 +1,4 @@
-/* Roche 商城 AI 商品图 v1.10.4
+/* Roche 商城 AI 商品图 v1.10.5
  * 调用 Roche.ai.generateImage；可单独配置商品生图服务。
  * 每件商品独立生图任务，可能计费。失败、刷新和中断不自动重试。
  * 不额外调用聊天、翻译或搜图接口；新赠送订单附带原生商品图片消息。可在系统图床页面手动同步至 ImgBB，成功后保存直链。
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheMarketPhotos?.destroy();
- const VERSION='1.10.4',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
+ const VERSION='1.10.5',ID='roche-market-photos',PREF='roche.marketAI.preferences.v1',DB='RocheMarketAIImages';
  const api=window.Roche,owner=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
  let pref;try{pref=JSON.parse(localStorage.getItem(PREF))||{};}catch{pref={};}
  if(pref.version!==VERSION){if(!['batch','manual'].includes(pref.mode))pref.mode='batch';pref.version=VERSION;}
@@ -543,7 +543,7 @@
  .rmai-sms-message{max-width:88%!important;display:flex!important;flex-direction:column;align-items:flex-start;position:relative;min-width:0}
  .rmai-sms-message.rmai-sms-outgoing{align-items:flex-end}
  .rmai-sms-message>svg{display:none!important}
- [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;min-width:0!important;white-space:pre-wrap!important;word-break:normal!important;overflow-wrap:anywhere!important;position:relative;font:400 16px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#f5f5f5!important;color:#101010!important;margin:0!important;box-shadow:none!important}
+ [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{width:fit-content!important;max-width:100%!important;min-width:0!important;white-space:pre-wrap!important;word-break:normal!important;overflow-wrap:anywhere!important;position:relative;font:500 17px/1.35 -apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif!important;padding:7px 12px!important;border-radius:19px!important;min-height:34px;background:#f5f5f5!important;color:#101010!important;margin:0!important;box-shadow:none!important}
  [data-rmai-sms=detail] .rmai-sms-outgoing>.phone-message-html{background:#0787ff!important;color:white!important}
  [data-rmai-sms=detail] .rmai-sms-message>.phone-message-html{border-radius:25px!important;padding:10px 14px!important;min-height:44px;isolation:isolate}
  .rmai-sms-message>.phone-message-html:after{content:'';position:absolute;z-index:-1;left:0;bottom:-6px;width:26px;height:31px;background:inherit;transform:scaleX(-1);clip-path:path('M 0 0 H 26 C 26 13 22 16 19 19 C 17 22 21 27 22 31 C 16 29 11 25 8 25 H 0 Z');pointer-events:none}
