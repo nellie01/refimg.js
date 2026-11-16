@@ -1,4 +1,4 @@
-/* Roche 我方翻译独立挂载 v3.4.0
+/* Roche 我方翻译独立挂载 v3.5.0
  * 替换同轮翻译插件。翻译单独计费，每轮合并一次；未挂载时关闭。
  * 仅使用用户选定的现有 API 预设；不修改其他 API 挂载。
  */
@@ -9,20 +9,21 @@
   window.RocheTranslationBinding?.destroy();
   const api = window.Roche;
   if (!api?.memory?.getShortTerm || !window.RochePlugin?.register) return;
-  const VERSION = '3.4.0', ID = 'roche-same-round-translation';
+  const VERSION = '3.5.0', ID = 'roche-same-round-translation';
   const KEY = 'roche.translationBinding.v3', LOG_KEY = 'roche.translationBinding.calls.v1', OBS_KEY = 'roche.translationBinding.observed.v1';
   const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; } };
   const data = read(KEY, {});
   if (!Array.isArray(data.jobs)) data.jobs = [];
   if (typeof data.presetId !== 'string') data.presetId = '';
   data.enabled = data.enabled === true;
+  if (typeof data.hydrogenProtection !== 'boolean') data.hydrogenProtection = true;
   // Old installations must not silently resume a retained API binding.
   if (data.transportRevision !== 1) {
     data.enabled = false; data.presetId = ''; data.binding = null; data.transportRevision = 1;
   }
   let stopped = false, busy = false, preparing = Promise.resolve(), presets = [];
   let card, observer, scheduled = false, activeCall, hostAllowed = false, pluginRecordId = '';
-  let generation = 0, healthBusy = false, installationStamp = '';
+  let generation = 0, healthBusy = false, installationStamp = '', hostPaused = false;
   let status = '未挂载时关闭。翻译会单独调用一次 API。';
   const originalFetch = window.fetch, ownRequests = new WeakSet();
   // A reload during a billed call has an unknown outcome. Never silently resend it.
@@ -32,7 +33,7 @@
   }
   const callLogs = () => { const list = read(LOG_KEY, []); return Array.isArray(list) ? list : []; };
   const observedLogs = () => { const list = read(OBS_KEY, []); return Array.isArray(list) ? list : []; };
-  // Logs describe this plugin's SDK invocations, not unrelated app/background requests.
+  // Logs describe this plugin's explicit HTTP invocations; other page requests have a separate ledger.
   // Never store API keys, request bodies, chat text, or raw service error messages here.
   const states = {running:'已发起 · 进行中',done:'成功',failed:'失败 · 未重试',interrupted:'已请求中断 · 计费结果未知'};
   function persistLog(record) {
@@ -49,6 +50,22 @@
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch {} };
   const clean = s => String(s || '').replace(/<!--[\s\S]*?-->/g, '').replace(/『翻译：[\s\S]*?』/g, '').trim();
   const normal = s => clean(s).replace(/\s+/g, ' ');
+  const isHydrogen = model => /gemini[-_\s]*4[-_\s]*hydrogen(?:$|[^a-z0-9])/i.test(String(model || ''));
+  function cleanLegacyTranslation() {
+    for (const name of ['RocheSameRoundTranslation','RocheSelfTranslate']) try { window[name]?.destroy?.(); } catch {}
+    try {
+      const legacy = read('roche.selfTranslate.v1', {});
+      if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
+        legacy.enabled = false; legacy.auto = false;
+        localStorage.setItem('roche.selfTranslate.v1',JSON.stringify(legacy));
+      }
+      localStorage.removeItem('roche.selfTranslate.v1.key'); sessionStorage.removeItem('roche.selfTranslate.v1.key');
+      const batches = read('roche.sameRoundTranslation.v2', {});
+      for (const batch of Object.values(batches)) if (Array.isArray(batch?.items)) batch.items = batch.items.filter(item=>item.english);
+      localStorage.setItem('roche.sameRoundTranslation.v2',JSON.stringify(batches));
+    } catch {}
+  }
+  cleanLegacyTranslation();
   async function readStore(storeName, query) {
     return new Promise((resolve, reject) => {
       let db, settled = false;
@@ -116,11 +133,13 @@
         data.installationStamp = stamp; save();
       }
       if (!matchesPlugin(plugin) || plugin.enabled !== true) {
+        hostPaused = true;
         if (hostAllowed || data.jobs.some(j => ['waiting','running'].includes(j.status))) cancelPending('插件已暂停或移除');
         hostAllowed = false;
         setStatus('插件已暂停：待翻译任务已清空，不再发起翻译请求。');
         return false;
       }
+      hostPaused = false;
       if (!hostAllowed) setStatus(data.enabled && data.presetId ? '已启用。仅翻译之后的新一轮消息，不补翻已取消的任务。' : '翻译已关闭，不会调用翻译 API。');
       hostAllowed = true;
       return true;
@@ -169,11 +188,16 @@
     panel.dataset.signature = signature;
     panel.querySelector('summary').textContent = '网页其他 API 观察记录（' + list.length + '）';
     const content = panel.querySelector('div'); content.replaceChildren();
-    const note = document.createElement('p'); note.textContent = '只观察本页已经发出的模型请求，不发测试请求，不存密钥或聊天正文。用途不作推定；看不到其他页面、服务器后台及内部重试。'; content.append(note);
+    const note = document.createElement('p'); note.textContent = '记录本页模型请求及本地拦截尝试。已拦截代表未发送。用途线索只匹配固定系统任务标记，不保存提示词；调用位置仅保留脚本文件名和行列。旧记录不能补查来源；看不到其他页面或服务商内部任务。'; content.append(note);
     if (!list.length) { const empty = document.createElement('p'); empty.textContent = '启用本插件后暂无观察记录。'; content.append(empty); }
     for (const item of list) {
       const row = document.createElement('div'); row.style.cssText = 'padding:8px 0;border-bottom:1px solid #e4e4e7;overflow-wrap:anywhere';
-      row.textContent = new Date(item.started).toLocaleString() + ' · ' + item.model + ' · ' + item.host + ' · ' + (item.httpStatus ? 'HTTP ' + item.httpStatus : item.finished ? '网络失败或已中断' : '请求进行中') + ' · 网页其他请求（用途未确认）'; content.append(row);
+      const title = document.createElement('strong');
+      title.textContent = new Date(item.started).toLocaleString() + ' · ' + item.model + ' · ' + (item.blocked ? '本地已拦截 · 未发送' : item.httpStatus ? 'HTTP ' + item.httpStatus : item.finished ? '网络失败或已中断' : '请求进行中');
+      const detail = document.createElement('div'); detail.textContent = item.host + ' · ' + (item.purpose ? '用途线索：' + item.purpose : '用途未确认（旧记录无法补查）');
+      row.append(title,detail);
+      if (item.callers?.length) { const source = document.createElement('div'); source.style.cssText = 'white-space:pre-wrap;font-size:11px'; source.textContent = '调用位置：\n' + item.callers.map(f=>(f.kind === 'plugin' ? '插件/' : '网页/') + f.file + ':' + f.line + ':' + f.column + (f.fn ? ' · ' + f.fn : '')).join('\n'); row.append(source); }
+      content.append(row);
     }
   }
   function persistObserved(record) {
@@ -182,42 +206,80 @@
       localStorage.setItem(OBS_KEY,JSON.stringify(list.slice(-200))); renderObserved();
     } catch {} // Observation failures must never affect the original request.
   }
+  function callerFrames(stack) {
+    const frames = [];
+    for (const line of String(stack || '').split('\n').slice(1)) {
+      const match = line.match(/(roche-plugin:)?(https?:\/\/[^\s)]+):(\d+):(\d+)/);
+      if (!match) continue;
+      let file; try { file = new URL(match[2]).pathname.split('/').pop(); } catch { continue; }
+      if (!/^[a-zA-Z0-9_.-]+\.js$/.test(file || '')) continue;
+      const fn = line.match(/^\s*at\s+(?:async\s+)?([a-zA-Z_$][\w.$]*)\s*\(/)?.[1] || '';
+      if (fn === 'observedFetch') continue;
+      frames.push({kind:match[1] || line.includes('roche-plugin:') ? 'plugin' : 'page',file,line:Number(match[3]),column:Number(match[4]),fn:fn.slice(0,80)});
+      if (frames.length >= 6) break;
+    }
+    return frames;
+  }
+  function purposeHint(payload) {
+    const texts = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(p=>typeof p?.text === 'string' ? p.text : '').join('') : '';
+    const systems = [texts(payload.system),texts(payload.systemInstruction?.parts),texts(payload.system_instruction?.parts),...(Array.isArray(payload.messages) ? payload.messages.filter(m=>m?.role === 'system').map(m=>texts(m.content)) : [])].filter(Boolean).map(text=>text.trim());
+    const rules = [
+      ['你是长期记忆相关性打分器。','记忆相关性打分','memory-rerank'],
+      ['你是一个精简但高保真的长期记忆摘要助手。','自动摘要记忆','memory-summary'],
+      ['你是一个精简的记忆提取助手。','事实记忆提取','memory-extract'],
+      ['【角色设定】\n你是一个高级的“角色与关系架构师”。','核心记忆总结','memory-core'],
+      ['你是长期记忆事实合并裁决器。','记忆合并裁决','memory-merge-score'],
+      ['你是长期记忆摘要助手。请把多条已经确认属于同一件事的事实记忆','记忆合并总结','memory-merge'],
+      ['你是一个向量记忆清洗器。','向量记忆清洗','memory-clean'],
+      ['你是一个虚拟世界模拟引擎。你的任务是根据角色的上下文','生成生活轨迹','trajectory'],
+      ['你是一个【沉浸式虚拟群聊的导演/上帝视角】。','后台群聊活动','background-group'],
+      ['你当前在一个线上私聊场景中。你必须始终保持人设。','正常私聊主回复','main-chat'],
+      ['你当前处于一个现代智能手机的【纯文本短信 (SMS/iMessage)】场景中。','正常短信主回复','main-sms']
+    ];
+    for (const text of systems) {
+      for (const [prefix,purpose,rule] of rules) if (text.startsWith(prefix)) return {purpose,rule};
+      if (text.startsWith('你是一个沉浸式虚拟社交网络中的用户（角色）。')) return text.includes('【本轮模式：私聊】') ? {purpose:'后台私聊续写',rule:'background-private'} : text.includes('【本轮模式：社交动态】') ? {purpose:'后台社交动态',rule:'background-social'} : {purpose:'后台角色活动',rule:'background'};
+    }
+    return {purpose:'未匹配任务标记',rule:'unknown'};
+  }
+  function inspectModelRequest(input, raw) {
+    let url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    let body = null;
+    if (typeof raw === 'string') try { body = JSON.parse(raw); } catch {}
+    for (let n = 0; n < 3 && body && typeof body.url === 'string' && typeof body.body === 'string'; n++) {
+      url = body.url;
+      try { body = JSON.parse(body.bodyEncoding === 'base64' ? new TextDecoder().decode(Uint8Array.from(atob(body.body),char=>char.charCodeAt(0))) : body.body); } catch { return null; }
+    }
+    if (!/(?:\/messages|\/chat\/completions|\/responses|:generateContent|:streamGenerateContent|\/api\/(?:chat|schedule))(?:[/?]|$)/i.test(url)) return null;
+    const target = new URL(url,location.href), payload = body?.payload || body || {};
+    const modelInPath = target.pathname.match(/\/models\/([^/]+):(?:streamGenerateContent|generateContent)$/)?.[1];
+    const model = payload.model || (modelInPath && decodeURIComponent(modelInPath));
+    return typeof model === 'string' && model.trim() ? {model:metadata(model),host:target.host,...purposeHint(payload)} : null;
+  }
   function observedFetch(input, init) {
-    if (stopped || !hostAllowed || (init && ownRequests.has(init))) return Reflect.apply(originalFetch,this,arguments);
-    const started = Date.now();
-    let record, outcome;
-    const observe = raw => {
-      try {
-        let url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        let body; try { body = typeof raw === 'string' ? JSON.parse(raw) : null; } catch { return; }
-        if (body && typeof body.url === 'string' && typeof body.body === 'string' && body.bodyEncoding !== 'base64') {
-          url = body.url; try { body = JSON.parse(body.body); } catch { return; }
-        }
-        if (!/(?:\/messages|\/chat\/completions|\/responses|:generateContent|:streamGenerateContent|\/api\/(?:chat|schedule))(?:[/?]|$)/i.test(url)) return;
-        const target = new URL(url,location.href);
-        const modelInPath = target.pathname.match(/\/models\/([^/]+):(?:streamGenerateContent|generateContent)$/)?.[1];
-        const model = body?.model || body?.payload?.model || (modelInPath && decodeURIComponent(modelInPath));
-        if (typeof model !== 'string' || !model.trim()) return;
-        record = {id:crypto.randomUUID(),started,model:metadata(model),host:target.host};
-        if (outcome) Object.assign(record,outcome); persistObserved(record);
-      } catch {}
+    if (stopped || hostPaused || (init && ownRequests.has(init))) return Reflect.apply(originalFetch,this,arguments);
+    const started = Date.now(), callers = callerFrames(new Error().stack), args = arguments, receiver = this;
+    const dispatch = raw => {
+      if (stopped || hostPaused) return Reflect.apply(originalFetch,receiver,args);
+      let info; try { info = inspectModelRequest(input,raw); } catch {}
+      let record = info ? {id:crypto.randomUUID(),started,...info,callers} : null;
+      if (record && data.hydrogenProtection && isHydrogen(record.model)) {
+        record.blocked = true; record.finished = Date.now(); persistObserved(record);
+        setStatus('已在本页发送前拦截 Hydrogen，请求未发出。可查看其他 API 观察记录中的用途线索和调用位置。');
+        return Promise.reject(new DOMException('Roche protection blocked the selected Hydrogen request before sending.','AbortError'));
+      }
+      if (record && hostAllowed) persistObserved(record); else record = null;
+      let result;
+      try { result = Reflect.apply(originalFetch,receiver,args); }
+      catch (error) { if (record) { record.finished = Date.now(); persistObserved(record); } throw error; }
+      result.then(response=>{ if (record) { record.finished = Date.now(); record.httpStatus = response.status; persistObserved(record); } },()=>{ if (record) { record.finished = Date.now(); persistObserved(record); } });
+      return result;
     };
-    try {
-      if (typeof init?.body === 'string') observe(init.body);
-      else if (input instanceof Request && !init?.body) input.clone().text().then(observe).catch(()=>{});
-    } catch {}
-    let result;
-    try { result = Reflect.apply(originalFetch,this,arguments); }
-    catch (error) { if (record) { record.finished = Date.now(); persistObserved(record); } throw error; }
-    // Attach observation callbacks, but return the exact original promise/response.
-    result.then(response=>{
-      outcome = {finished:Date.now(),httpStatus:response.status};
-      if (record) { Object.assign(record,outcome); persistObserved(record); }
-    },()=>{
-      outcome = {finished:Date.now()};
-      if (record) { Object.assign(record,outcome); persistObserved(record); }
-    });
-    return result;
+    if (typeof init?.body === 'string') return dispatch(init.body);
+    if (input instanceof Request && !init?.body) {
+      try { return input.clone().text().then(raw=>dispatch(raw),()=>dispatch(null)); } catch { return dispatch(null); }
+    }
+    return dispatch(null);
   }
   async function loadPresets() {
     // The app's preset store is Roche_db/presets in both verified deployments.
@@ -348,6 +410,33 @@
       try { await loadPresets(); if (!stopped) { fillOptions(select); setStatus('预设列表已刷新。'); } } catch (error) { setStatus(error.message); }
     });
     const version = document.createElement('small'); version.textContent = '独立翻译 v' + VERSION; version.style.cssText = 'display:block;color:#a1a1aa';
+    const protection = document.createElement('section'); protection.style.cssText = 'margin:12px 0;padding:12px;border:1px solid #d1fae5;border-radius:12px;background:#f0fdf4';
+    const protectionState = document.createElement('strong'); protectionState.dataset.protection = '';
+    const protectionNote = document.createElement('p'); protectionNote.style.cssText = 'margin:6px 0;font-size:12px'; protectionNote.textContent = '开启保护后，本页 Gemini-4-hydrogen 请求会在发送前被阻止。保持整个插件启用；“立即停止翻译”只停止翻译。关闭整个插件或离开本页后，保护不再生效。';
+    const guard = document.createElement('button'); guard.type = 'button'; guard.dataset.guardToggle = ''; guard.style.cssText = 'border:0;background:transparent;color:#166534;font:inherit;padding:6px 0';
+    const refreshProtection = () => { protectionState.textContent = data.hydrogenProtection ? 'Hydrogen 调用保护：已开启' : 'Hydrogen 调用保护：已关闭'; guard.textContent = data.hydrogenProtection ? '解除 Hydrogen 拦截' : '开启 Hydrogen 拦截'; };
+    refreshProtection();
+    guard.addEventListener('click',()=>{data.hydrogenProtection = !data.hydrogenProtection; save(); refreshProtection(); setStatus(data.hydrogenProtection ? '已开启本页 Hydrogen 发送前拦截。' : 'Hydrogen 拦截已解除，网页后续请求可能产生该模型费用。');});
+    const cleanup = document.createElement('button'); cleanup.type = 'button'; cleanup.textContent = '清理旧翻译残留'; cleanup.style.cssText = 'display:block;border:0;background:transparent;color:#166534;font:inherit;padding:6px 0';
+    cleanup.addEventListener('click',()=>{cleanLegacyTranslation();cancelPending('已清理旧翻译待办');setStatus('已停止已知旧翻译入口、关闭旧版自动翻译并取消待办。聊天记录、已保存译文和当前翻译G挂载保留。');});
+    const inspect = document.createElement('button'); inspect.type = 'button'; inspect.textContent = '检查 Hydrogen 挂载位置'; inspect.style.cssText = 'display:block;border:0;background:transparent;color:#166534;font:inherit;padding:6px 0';
+    const mounts = document.createElement('p'); mounts.style.cssText = 'margin:6px 0;font-size:12px;white-space:pre-wrap';
+    inspect.addEventListener('click',async()=>{
+      inspect.disabled = true;
+      try {
+        const available = await loadPresets(), current = await readStore('settings',store=>store.get('current')).catch(()=>null), mounted = read('noir_mounted_apis',{});
+        const matches = [];
+        if (isHydrogen(current?.model)) matches.push('默认 API：' + metadata(current.model));
+        for (const [key,label] of [['memoryReranking','记忆打分'],['memorySummarization','记忆摘要'],['memoryEmbeddings','记忆向量'],['charActivity','后台活动'],['autoPost','自动发帖'],['offlineTheater','线下小剧场']]) {
+          const selected = mounted[key] && mounted[key] !== 'default' ? available.find(p=>String(p.id) === String(mounted[key])) : null;
+          const model = selected?.model || current?.model;
+          if (isHydrogen(model)) matches.push(label + '：' + metadata(model) + (selected ? '（单独挂载）' : '（使用默认配置）'));
+        }
+        mounts.textContent = (matches.length ? matches.join('\n') : '当前可读的挂载配置里没有匹配到 Hydrogen。') + '\n这里只核对当前设置，不代表上述功能本轮都已调用。';
+      } catch { mounts.textContent = '暂时无法读取当前挂载，不影响 Hydrogen 请求拦截。'; }
+      finally { inspect.disabled = false; }
+    });
+    protection.append(protectionState,protectionNote,guard,cleanup,inspect,mounts);
     const stop = document.createElement('button'); stop.type = 'button'; stop.textContent = '立即停止翻译';
     stop.style.cssText = 'display:block;border:1px solid #fecaca;border-radius:10px;background:#fff1f2;color:#be123c;font:inherit;padding:9px 12px;margin:8px 0';
     stop.addEventListener('click', () => {
@@ -368,7 +457,7 @@
     logs.append(logsTitle, logsNote, list, download);
     const observed = document.createElement('details'); observed.dataset.observed = ''; observed.style.cssText = 'margin:12px 0;font-size:12px;color:#71717a';
     const observedTitle = document.createElement('summary'); const observedList = document.createElement('div'); observedList.style.cssText = 'max-height:260px;overflow:auto'; observed.append(observedTitle,observedList);
-    card.append(heading, description, label, select, note, refresh, stop, logs, observed, version); container.prepend(card); renderLogs(); renderObserved();
+    card.append(heading, description, label, select, note, refresh, stop, protection, logs, observed, version); container.prepend(card); renderLogs(); renderObserved();
     loadPresets().then(() => { if (!stopped && select.isConnected) fillOptions(select); }).catch(error => setStatus(error.message));
   }
   async function prepare(ctx) {
@@ -433,6 +522,7 @@
     const provider = providers[preset.provider.trim().toLowerCase()];
     const model = preset.model.trim();
     if (!provider || !model || model.length > 300 || /[\r\n\x00]/.test(model) || !preset.apiKey.split(',').some(k=>k.trim())) throw publicError('模型、协议或密钥无效，翻译未启用。');
+    if (data.hydrogenProtection && isHydrogen(model)) throw publicError('Hydrogen 调用保护已开启，未启用这个模型的翻译挂载。');
     const url = secureURL(preset.endpoint.trim());
     let path = url.pathname.replace(/\/+$/, '');
     if (provider === 'gemini-native') {
@@ -642,6 +732,12 @@
     if (event.key === OBS_KEY) renderObserved();
     if (event.key === KEY) {
       const settings = read(KEY, {});
+      if (typeof settings.hydrogenProtection === 'boolean' && settings.hydrogenProtection !== data.hydrogenProtection) {
+        data.hydrogenProtection = settings.hydrogenProtection;
+        const state = card?.querySelector('[data-protection]'), toggle = card?.querySelector('[data-guard-toggle]');
+        if (state) state.textContent = data.hydrogenProtection ? 'Hydrogen 调用保护：已开启' : 'Hydrogen 调用保护：已关闭';
+        if (toggle) toggle.textContent = data.hydrogenProtection ? '解除 Hydrogen 拦截' : '开启 Hydrogen 拦截';
+      }
       if ((settings.enabled === true) !== data.enabled || String(settings.presetId || '') !== data.presetId) {
         data.enabled = settings.enabled === true; data.presetId = String(settings.presetId || ''); data.binding = settings.binding || null;
         cancelPending('其他窗口已关闭翻译或切换预设');
