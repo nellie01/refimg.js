@@ -1,7 +1,7 @@
-/* GPhone · 回复打字节奏 v1.0.1
+/* GPhone · 回复打字节奏 v1.0.2
    只在当前可见聊天中排列新回复的显示顺序，不修改消息或调用 AI。
    短句较快、长句较慢；原网页已等待的时间会计入停顿。
-   仅有自然的回复间隔，不添加提示、按钮或额外气泡。
+   仅有自然的回复间隔，不添加提示、按钮或额外气泡，保留原生输入状态。
    旧聊天/历史记录不重播，离开页面会释放待显示消息。
 */
 (() => {
@@ -33,7 +33,6 @@
   style.id = id;
   style.textContent = `
     .chat-viewport-root [data-gprp-hidden] {display:none!important}
-    .chat-viewport-root .chat-scroll-area>div:not(:has([id^="msg-"])):has(.typing-dot) {display:none!important}
   `;
   document.head.append(style);
 
@@ -177,7 +176,7 @@
   const observer=new MutationObserver(schedule);
   observer.observe(document.body,{subtree:true,childList:true,characterData:true});
   window.GPhoneReplyPacing={
-    version:'1.0.1',
+    version:'1.0.2',
     delayFor,
     showNow(){for(const view of contexts.values()){flush(view);view.liveUntil=0;}},
     stop(){
@@ -191,6 +190,6 @@
       style.remove();
     }
   };
-  window.RochePlugin?.register?.({id,name:'GPhone 回复打字节奏',version:'1.0.1',apps:[]});
+  window.RochePlugin?.register?.({id,name:'GPhone 回复打字节奏',version:'1.0.2',apps:[]});
   schedule();
 })();
