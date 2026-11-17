@@ -1,4 +1,4 @@
-/* Roche 我方翻译独立挂载 v3.5.0
+/* Roche 我方翻译独立挂载 v3.6.0
  * 替换同轮翻译插件。翻译单独计费，每轮合并一次；未挂载时关闭。
  * 仅使用用户选定的现有 API 预设；不修改其他 API 挂载。
  */
@@ -9,14 +9,15 @@
   window.RocheTranslationBinding?.destroy();
   const api = window.Roche;
   if (!api?.memory?.getShortTerm || !window.RochePlugin?.register) return;
-  const VERSION = '3.5.0', ID = 'roche-same-round-translation';
+  const VERSION = '3.6.0', ID = 'roche-same-round-translation';
   const KEY = 'roche.translationBinding.v3', LOG_KEY = 'roche.translationBinding.calls.v1', OBS_KEY = 'roche.translationBinding.observed.v1';
   const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; } };
   const data = read(KEY, {});
   if (!Array.isArray(data.jobs)) data.jobs = [];
   if (typeof data.presetId !== 'string') data.presetId = '';
   data.enabled = data.enabled === true;
-  if (typeof data.hydrogenProtection !== 'boolean') data.hydrogenProtection = true;
+  // Explicitly retire the persisted 3.5 blacklist, including on other open tabs.
+  data.hydrogenProtection = false;
   // Old installations must not silently resume a retained API binding.
   if (data.transportRevision !== 1) {
     data.enabled = false; data.presetId = ''; data.binding = null; data.transportRevision = 1;
@@ -25,7 +26,6 @@
   let card, observer, scheduled = false, activeCall, hostAllowed = false, pluginRecordId = '';
   let generation = 0, healthBusy = false, installationStamp = '', hostPaused = false;
   let status = '未挂载时关闭。翻译会单独调用一次 API。';
-  const originalFetch = window.fetch, ownRequests = new WeakSet();
   // A reload during a billed call has an unknown outcome. Never silently resend it.
   for (const job of data.jobs) {
     if (job.status === 'running') job.status = 'interrupted';
@@ -186,10 +186,10 @@
     const list = observedLogs().slice().reverse(), signature = JSON.stringify(list);
     if (panel.dataset.signature === signature) return;
     panel.dataset.signature = signature;
-    panel.querySelector('summary').textContent = '网页其他 API 观察记录（' + list.length + '）';
+    panel.querySelector('summary').textContent = '历史网页 API 观察记录（' + list.length + '）';
     const content = panel.querySelector('div'); content.replaceChildren();
-    const note = document.createElement('p'); note.textContent = '记录本页模型请求及本地拦截尝试。已拦截代表未发送。用途线索只匹配固定系统任务标记，不保存提示词；调用位置仅保留脚本文件名和行列。旧记录不能补查来源；看不到其他页面或服务商内部任务。'; content.append(note);
-    if (!list.length) { const empty = document.createElement('p'); empty.textContent = '启用本插件后暂无观察记录。'; content.append(empty); }
+    const note = document.createElement('p'); note.textContent = '这里保留旧版历史记录。3.6 起不再接管网页网络请求，不新增网页其他调用记录；旧“已拦截”记录不代表现在仍在拦截。翻译自身调用仍记录在上方。'; content.append(note);
+    if (!list.length) { const empty = document.createElement('p'); empty.textContent = '没有旧版观察记录。'; content.append(empty); }
     for (const item of list) {
       const row = document.createElement('div'); row.style.cssText = 'padding:8px 0;border-bottom:1px solid #e4e4e7;overflow-wrap:anywhere';
       const title = document.createElement('strong');
@@ -205,81 +205,6 @@
       const list = observedLogs().filter(item=>item.id !== record.id); list.push(record); list.sort((a,b)=>a.started-b.started);
       localStorage.setItem(OBS_KEY,JSON.stringify(list.slice(-200))); renderObserved();
     } catch {} // Observation failures must never affect the original request.
-  }
-  function callerFrames(stack) {
-    const frames = [];
-    for (const line of String(stack || '').split('\n').slice(1)) {
-      const match = line.match(/(roche-plugin:)?(https?:\/\/[^\s)]+):(\d+):(\d+)/);
-      if (!match) continue;
-      let file; try { file = new URL(match[2]).pathname.split('/').pop(); } catch { continue; }
-      if (!/^[a-zA-Z0-9_.-]+\.js$/.test(file || '')) continue;
-      const fn = line.match(/^\s*at\s+(?:async\s+)?([a-zA-Z_$][\w.$]*)\s*\(/)?.[1] || '';
-      if (fn === 'observedFetch') continue;
-      frames.push({kind:match[1] || line.includes('roche-plugin:') ? 'plugin' : 'page',file,line:Number(match[3]),column:Number(match[4]),fn:fn.slice(0,80)});
-      if (frames.length >= 6) break;
-    }
-    return frames;
-  }
-  function purposeHint(payload) {
-    const texts = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(p=>typeof p?.text === 'string' ? p.text : '').join('') : '';
-    const systems = [texts(payload.system),texts(payload.systemInstruction?.parts),texts(payload.system_instruction?.parts),...(Array.isArray(payload.messages) ? payload.messages.filter(m=>m?.role === 'system').map(m=>texts(m.content)) : [])].filter(Boolean).map(text=>text.trim());
-    const rules = [
-      ['你是长期记忆相关性打分器。','记忆相关性打分','memory-rerank'],
-      ['你是一个精简但高保真的长期记忆摘要助手。','自动摘要记忆','memory-summary'],
-      ['你是一个精简的记忆提取助手。','事实记忆提取','memory-extract'],
-      ['【角色设定】\n你是一个高级的“角色与关系架构师”。','核心记忆总结','memory-core'],
-      ['你是长期记忆事实合并裁决器。','记忆合并裁决','memory-merge-score'],
-      ['你是长期记忆摘要助手。请把多条已经确认属于同一件事的事实记忆','记忆合并总结','memory-merge'],
-      ['你是一个向量记忆清洗器。','向量记忆清洗','memory-clean'],
-      ['你是一个虚拟世界模拟引擎。你的任务是根据角色的上下文','生成生活轨迹','trajectory'],
-      ['你是一个【沉浸式虚拟群聊的导演/上帝视角】。','后台群聊活动','background-group'],
-      ['你当前在一个线上私聊场景中。你必须始终保持人设。','正常私聊主回复','main-chat'],
-      ['你当前处于一个现代智能手机的【纯文本短信 (SMS/iMessage)】场景中。','正常短信主回复','main-sms']
-    ];
-    for (const text of systems) {
-      for (const [prefix,purpose,rule] of rules) if (text.startsWith(prefix)) return {purpose,rule};
-      if (text.startsWith('你是一个沉浸式虚拟社交网络中的用户（角色）。')) return text.includes('【本轮模式：私聊】') ? {purpose:'后台私聊续写',rule:'background-private'} : text.includes('【本轮模式：社交动态】') ? {purpose:'后台社交动态',rule:'background-social'} : {purpose:'后台角色活动',rule:'background'};
-    }
-    return {purpose:'未匹配任务标记',rule:'unknown'};
-  }
-  function inspectModelRequest(input, raw) {
-    let url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    let body = null;
-    if (typeof raw === 'string') try { body = JSON.parse(raw); } catch {}
-    for (let n = 0; n < 3 && body && typeof body.url === 'string' && typeof body.body === 'string'; n++) {
-      url = body.url;
-      try { body = JSON.parse(body.bodyEncoding === 'base64' ? new TextDecoder().decode(Uint8Array.from(atob(body.body),char=>char.charCodeAt(0))) : body.body); } catch { return null; }
-    }
-    if (!/(?:\/messages|\/chat\/completions|\/responses|:generateContent|:streamGenerateContent|\/api\/(?:chat|schedule))(?:[/?]|$)/i.test(url)) return null;
-    const target = new URL(url,location.href), payload = body?.payload || body || {};
-    const modelInPath = target.pathname.match(/\/models\/([^/]+):(?:streamGenerateContent|generateContent)$/)?.[1];
-    const model = payload.model || (modelInPath && decodeURIComponent(modelInPath));
-    return typeof model === 'string' && model.trim() ? {model:metadata(model),host:target.host,...purposeHint(payload)} : null;
-  }
-  function observedFetch(input, init) {
-    if (stopped || hostPaused || (init && ownRequests.has(init))) return Reflect.apply(originalFetch,this,arguments);
-    const started = Date.now(), callers = callerFrames(new Error().stack), args = arguments, receiver = this;
-    const dispatch = raw => {
-      if (stopped || hostPaused) return Reflect.apply(originalFetch,receiver,args);
-      let info; try { info = inspectModelRequest(input,raw); } catch {}
-      let record = info ? {id:crypto.randomUUID(),started,...info,callers} : null;
-      if (record && data.hydrogenProtection && isHydrogen(record.model)) {
-        record.blocked = true; record.finished = Date.now(); persistObserved(record);
-        setStatus('已在本页发送前拦截 Hydrogen，请求未发出。可查看其他 API 观察记录中的用途线索和调用位置。');
-        return Promise.reject(new DOMException('Roche protection blocked the selected Hydrogen request before sending.','AbortError'));
-      }
-      if (record && hostAllowed) persistObserved(record); else record = null;
-      let result;
-      try { result = Reflect.apply(originalFetch,receiver,args); }
-      catch (error) { if (record) { record.finished = Date.now(); persistObserved(record); } throw error; }
-      result.then(response=>{ if (record) { record.finished = Date.now(); record.httpStatus = response.status; persistObserved(record); } },()=>{ if (record) { record.finished = Date.now(); persistObserved(record); } });
-      return result;
-    };
-    if (typeof init?.body === 'string') return dispatch(init.body);
-    if (input instanceof Request && !init?.body) {
-      try { return input.clone().text().then(raw=>dispatch(raw),()=>dispatch(null)); } catch { return dispatch(null); }
-    }
-    return dispatch(null);
   }
   async function loadPresets() {
     // The app's preset store is Roche_db/presets in both verified deployments.
@@ -411,12 +336,8 @@
     });
     const version = document.createElement('small'); version.textContent = '独立翻译 v' + VERSION; version.style.cssText = 'display:block;color:#a1a1aa';
     const protection = document.createElement('section'); protection.style.cssText = 'margin:12px 0;padding:12px;border:1px solid #d1fae5;border-radius:12px;background:#f0fdf4';
-    const protectionState = document.createElement('strong'); protectionState.dataset.protection = '';
-    const protectionNote = document.createElement('p'); protectionNote.style.cssText = 'margin:6px 0;font-size:12px'; protectionNote.textContent = '开启保护后，本页 Gemini-4-hydrogen 请求会在发送前被阻止。保持整个插件启用；“立即停止翻译”只停止翻译。关闭整个插件或离开本页后，保护不再生效。';
-    const guard = document.createElement('button'); guard.type = 'button'; guard.dataset.guardToggle = ''; guard.style.cssText = 'border:0;background:transparent;color:#166534;font:inherit;padding:6px 0';
-    const refreshProtection = () => { protectionState.textContent = data.hydrogenProtection ? 'Hydrogen 调用保护：已开启' : 'Hydrogen 调用保护：已关闭'; guard.textContent = data.hydrogenProtection ? '解除 Hydrogen 拦截' : '开启 Hydrogen 拦截'; };
-    refreshProtection();
-    guard.addEventListener('click',()=>{data.hydrogenProtection = !data.hydrogenProtection; save(); refreshProtection(); setStatus(data.hydrogenProtection ? '已开启本页 Hydrogen 发送前拦截。' : 'Hydrogen 拦截已解除，网页后续请求可能产生该模型费用。');});
+    const protectionState = document.createElement('strong'); protectionState.dataset.protection = ''; protectionState.textContent = '聊天请求拦截：已移除';
+    const protectionNote = document.createElement('p'); protectionNote.style.cssText = 'margin:6px 0;font-size:12px'; protectionNote.textContent = '聊天请求由原站直接处理。翻译在后台读取消息，不再让聊天等待翻译预处理。这里只保留旧翻译清理和挂载检查。';
     const cleanup = document.createElement('button'); cleanup.type = 'button'; cleanup.textContent = '清理旧翻译残留'; cleanup.style.cssText = 'display:block;border:0;background:transparent;color:#166534;font:inherit;padding:6px 0';
     cleanup.addEventListener('click',()=>{cleanLegacyTranslation();cancelPending('已清理旧翻译待办');setStatus('已停止已知旧翻译入口、关闭旧版自动翻译并取消待办。聊天记录、已保存译文和当前翻译G挂载保留。');});
     const inspect = document.createElement('button'); inspect.type = 'button'; inspect.textContent = '检查 Hydrogen 挂载位置'; inspect.style.cssText = 'display:block;border:0;background:transparent;color:#166534;font:inherit;padding:6px 0';
@@ -433,10 +354,10 @@
           if (isHydrogen(model)) matches.push(label + '：' + metadata(model) + (selected ? '（单独挂载）' : '（使用默认配置）'));
         }
         mounts.textContent = (matches.length ? matches.join('\n') : '当前可读的挂载配置里没有匹配到 Hydrogen。') + '\n这里只核对当前设置，不代表上述功能本轮都已调用。';
-      } catch { mounts.textContent = '暂时无法读取当前挂载，不影响 Hydrogen 请求拦截。'; }
+      } catch { mounts.textContent = '暂时无法读取当前挂载，聊天请求仍由原站处理。'; }
       finally { inspect.disabled = false; }
     });
-    protection.append(protectionState,protectionNote,guard,cleanup,inspect,mounts);
+    protection.append(protectionState,protectionNote,cleanup,inspect,mounts);
     const stop = document.createElement('button'); stop.type = 'button'; stop.textContent = '立即停止翻译';
     stop.style.cssText = 'display:block;border:1px solid #fecaca;border-radius:10px;background:#fff1f2;color:#be123c;font:inherit;padding:9px 12px;margin:8px 0';
     stop.addEventListener('click', () => {
@@ -460,14 +381,22 @@
     card.append(heading, description, label, select, note, refresh, stop, protection, logs, observed, version); container.prepend(card); renderLogs(); renderObserved();
     loadPresets().then(() => { if (!stopped && select.isConnected) fillOptions(select); }).catch(error => setStatus(error.message));
   }
-  async function prepare(ctx) {
+  async function memoryWithTimeout(query) {
+    let timeout;
+    try {
+      return await Promise.race([Promise.resolve().then(()=>api.memory.getShortTerm(query)),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('Local memory read timed out')),4000);})]);
+    } finally { clearTimeout(timeout); }
+  }
+  async function prepare(ctx, roundStarted) {
     if (stopped || !data.enabled || !data.presetId || !ctx.conversationId || ctx.conversationType !== 'direct' || ctx.source && ctx.source !== 'online') return;
     const epoch = generation;
     if (!await checkHost()) return;
     const conversationId = String(ctx.conversationId);
-    const messages = await api.memory.getShortTerm({ conversationId, limit: 100 });
+    const messages = await memoryWithTimeout({ conversationId, limit: 100 });
     if (stopped || !hostAllowed || epoch !== generation || !data.enabled || !Array.isArray(messages)) return;
-    const ordered = [...messages].sort((a,b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+    // A fast character reply may arrive before the asynchronous read completes.
+    // Capture this turn at hook entry so that reply does not swallow its targets.
+    const ordered = messages.filter(m=>Number(m.timestamp || 0) <= roundStarted).sort((a,b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
     let lastPeer = -1;
     ordered.forEach((m,i) => { if (!m.isMe && m.senderId !== 'system' && m.type !== 'system_notice') lastPeer = i; });
     const existing = new Set(data.jobs.filter(j => j.status !== 'cancelled').flatMap(j => j.items.map(i => j.conversationId + ':' + i.id + ':' + i.source)));
@@ -486,10 +415,11 @@
     }
     save();
   }
-  async function contextProvider(ctx) {
-    const epoch = generation;
-    preparing = preparing.catch(() => {}).then(() => epoch === generation && prepare(ctx));
-    try { await preparing; } catch { setStatus('未能读取本轮消息，没有发出翻译请求。'); }
+  function contextProvider(ctx) {
+    const epoch = generation, roundStarted = Date.now();
+    preparing = preparing.catch(() => {}).then(() => epoch === generation && prepare(ctx,roundStarted)).catch(()=>{
+      if (!stopped && epoch === generation) setStatus('翻译读取消息失败或超时，已跳过本轮翻译，不影响原站聊天请求。');
+    });
     return ''; // Disable all same-round prompt injection in the replacement plugin.
   }
   function translationContext(job, messages) {
@@ -522,7 +452,6 @@
     const provider = providers[preset.provider.trim().toLowerCase()];
     const model = preset.model.trim();
     if (!provider || !model || model.length > 300 || /[\r\n\x00]/.test(model) || !preset.apiKey.split(',').some(k=>k.trim())) throw publicError('模型、协议或密钥无效，翻译未启用。');
-    if (data.hydrogenProtection && isHydrogen(model)) throw publicError('Hydrogen 调用保护已开启，未启用这个模型的翻译挂载。');
     const url = secureURL(preset.endpoint.trim());
     let path = url.pathname.replace(/\/+$/, '');
     if (provider === 'gemini-native') {
@@ -592,7 +521,6 @@
   async function sendTranslation(binding, key, messages, call) {
     const request = buildTranslationRequest(binding,key,messages);
     const options = {method:'POST',headers:request.headers,body:request.body,signal:call.controller.signal,credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer'};
-    ownRequests.add(options);
     const response = await window.fetch(request.url,options);
     const record = call.record;
     record.httpStatus = response.status;
@@ -706,7 +634,7 @@
       if (!data.enabled || !data.presetId || !await checkHost()) return;
       for (const job of data.jobs.filter(j => j.status === 'waiting')) {
         if (Date.now() - job.created > 30*60*1000) { job.status = 'expired'; save(); continue; }
-        const messages = await api.memory.getShortTerm({conversationId:job.conversationId,limit:100});
+        const messages = await memoryWithTimeout({conversationId:job.conversationId,limit:100});
         if (stopped || !hostAllowed || !data.enabled) break;
         const reply = Array.isArray(messages) && messages.some(m => !m.isMe && (!m.type || m.type === 'text') && m.senderId !== 'system' && Number(m.timestamp || 0) > job.after && clean(m.text));
         if (!reply) continue;
@@ -732,12 +660,6 @@
     if (event.key === OBS_KEY) renderObserved();
     if (event.key === KEY) {
       const settings = read(KEY, {});
-      if (typeof settings.hydrogenProtection === 'boolean' && settings.hydrogenProtection !== data.hydrogenProtection) {
-        data.hydrogenProtection = settings.hydrogenProtection;
-        const state = card?.querySelector('[data-protection]'), toggle = card?.querySelector('[data-guard-toggle]');
-        if (state) state.textContent = data.hydrogenProtection ? 'Hydrogen 调用保护：已开启' : 'Hydrogen 调用保护：已关闭';
-        if (toggle) toggle.textContent = data.hydrogenProtection ? '解除 Hydrogen 拦截' : '开启 Hydrogen 拦截';
-      }
       if ((settings.enabled === true) !== data.enabled || String(settings.presetId || '') !== data.presetId) {
         data.enabled = settings.enabled === true; data.presetId = String(settings.presetId || ''); data.binding = settings.binding || null;
         cancelPending('其他窗口已关闭翻译或切换预设');
@@ -756,9 +678,7 @@
   window.RocheTranslationBinding = {version:VERSION,destroy(){
     stopped = true; cancelPending('插件卸载或重新载入'); clearInterval(timer); clearInterval(healthTimer); observer.disconnect();
     window.removeEventListener('storage', storageChanged); window.removeEventListener('focus', health);
-    if (window.fetch === observedFetch) window.fetch = originalFetch;
     card?.remove(); document.querySelectorAll('.rrt-native').forEach(el=>el.remove());
   }};
-  window.fetch = observedFetch;
   save(); mount(); paint(); health();
 })();
