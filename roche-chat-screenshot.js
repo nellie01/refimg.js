@@ -5,8 +5,9 @@
   window.RocheChatScreenshot?.destroy?.();
 
   const ID = 'roche-chat-screenshot';
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const SETTINGS = ID + '.characters';
+  const ACTIVITY = ID + '.activity';
   const ARCHIVE = 'RocheChatScreenshotArchive';
   const OPEN = '<roche-local-screenshot>';
   const CLOSE = '</roche-local-screenshot>';
@@ -18,6 +19,7 @@
   const panels = new Set();
   const originalFetch = window.fetch;
   let active = true;
+  let roundStamp = 0;
 
   function preferences() {
     try {
@@ -132,6 +134,12 @@
     return withTime ? day + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) : day;
   }
 
+  function timeLabel(value) {
+    return new Intl.DateTimeFormat('zh-CN', {
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+    }).format(Number(value));
+  }
+
   function textLines(context, value, maxWidth) {
     const words = typeof Intl.Segmenter === 'function'
       ? new Intl.Segmenter(undefined, { granularity: 'word' })
@@ -164,75 +172,132 @@
     if (!ctx) throw Error('当前浏览器无法生成截图。');
     const width = 408;
     const font = 'system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
+    const messageFont = '500 17px ' + font;
+    let previousDay;
     const bubbles = rows.map(row => {
-      ctx.font = '16px ' + font;
-      const lines = textLines(ctx, row.text, 286);
-      const width = Math.max(46, Math.ceil(Math.max(...lines.map(line => ctx.measureText(line).width))) + 30);
-      return { row, lines, width, height: lines.length * 23 + 18 };
+      ctx.font = messageFont;
+      const lines = textLines(ctx, row.text, 294);
+      const width = Math.max(48, Math.ceil(Math.max(...lines.map(line => ctx.measureText(line).width))) + 28);
+      const day = dateLabel(row.timestamp);
+      const date = day === previousDay ? null : day;
+      previousDay = day;
+      return { row, lines, width, height: lines.length * 24 + 18, date };
     });
-    const height = 96 + bubbles.reduce((total, bubble) => total + bubble.height + 34, 0);
+    const height = 98 + bubbles.reduce((total, bubble) =>
+      total + bubble.height + 27 + (bubble.date ? 36 : 0), 0);
     if (height > 2048) throw Error('这段聊天太长，请选更短的一段。');
     canvas.width = width * 2;
     canvas.height = height * 2;
     ctx.scale(2, 2);
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#f5f4f0';
+    ctx.fillStyle = '#f2f4f7';
     ctx.fillRect(0, 0, width, height);
-    ctx.fillStyle = '#fcfbf8';
-    ctx.fillRect(0, 0, width, 72);
-    ctx.fillStyle = '#dddcd5';
-    ctx.fillRect(0, 71, width, 1);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, 80);
+    ctx.fillStyle = '#dce2ea';
+    ctx.fillRect(0, 79, width, 1);
+
+    const avatar = ctx.createLinearGradient(20, 18, 64, 62);
+    avatar.addColorStop(0, '#d5e4fc');
+    avatar.addColorStop(1, '#b7cce9');
+    ctx.fillStyle = avatar;
+    ctx.beginPath();
+    ctx.arc(43, 40, 22, 0, Math.PI * 2);
+    ctx.fill();
+    const name = String(persona).trim() || '聊天对象';
+    const initial = name.match(/[\p{L}\p{N}]/u)?.[0].toUpperCase() || '·';
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#222826';
+    ctx.fillStyle = '#243c58';
+    ctx.font = '600 18px ' + font;
+    ctx.fillText(initial, 43, 41);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#192436';
     ctx.font = '600 19px ' + font;
-    ctx.fillText(persona, width / 2, 25, width - 38);
+    ctx.fillText(name, 77, 31, width - 98);
     ctx.font = '12px ' + font;
-    ctx.fillStyle = '#59645e';
-    ctx.fillText('聊天截图', width / 2, 48);
-    let y = 88;
-    for (const { row, lines, width: bubbleWidth, height: bubbleHeight } of bubbles) {
+    ctx.fillStyle = '#536376';
+    ctx.fillText('私聊截图', 77, 53);
+
+    let y = 91;
+    for (const { row, lines, width: bubbleWidth, height: bubbleHeight, date } of bubbles) {
+      if (date) {
+        ctx.textAlign = 'center';
+        ctx.font = '500 11px ' + font;
+        const labelWidth = Math.ceil(ctx.measureText(date).width);
+        const lineWidth = (width - labelWidth) / 2 - 42;
+        ctx.fillStyle = '#d4dce7';
+        ctx.fillRect(22, y + 11, lineWidth, 1);
+        ctx.fillRect(width - 22 - lineWidth, y + 11, lineWidth, 1);
+        ctx.fillStyle = '#52647a';
+        ctx.fillText(date, width / 2, y + 11);
+        y += 36;
+      }
       // From the character’s phone, the character's own messages sit on the right.
       const outgoing = !row.isMe;
-      const x = outgoing ? width - 20 - bubbleWidth : 20;
-      ctx.textAlign = outgoing ? 'right' : 'left';
-      ctx.font = '11px ' + font;
-      ctx.fillStyle = '#59645e';
-      ctx.fillText(dateLabel(row.timestamp, true), outgoing ? width - 21 : 21, y + 6);
-      y += 17;
-      const radius = 15;
+      const x = outgoing ? width - 22 - bubbleWidth : 22;
+      const radius = 18;
       ctx.beginPath();
       ctx.moveTo(x + radius, y);
       ctx.arcTo(x + bubbleWidth, y, x + bubbleWidth, y + bubbleHeight, radius);
-      ctx.arcTo(x + bubbleWidth, y + bubbleHeight, x, y + bubbleHeight, outgoing ? 4 : radius);
-      ctx.arcTo(x, y + bubbleHeight, x, y, outgoing ? radius : 4);
+      ctx.arcTo(x + bubbleWidth, y + bubbleHeight, x, y + bubbleHeight, outgoing ? 6 : radius);
+      ctx.arcTo(x, y + bubbleHeight, x, y, outgoing ? radius : 6);
       ctx.arcTo(x, y, x + bubbleWidth, y, radius);
       ctx.closePath();
-      ctx.fillStyle = outgoing ? '#395f54' : '#ffffff';
+      ctx.fillStyle = outgoing ? '#dbe8fb' : '#ffffff';
       ctx.fill();
-      ctx.fillStyle = outgoing ? '#fff' : '#202623';
-      ctx.font = '16px ' + font;
+      ctx.strokeStyle = outgoing ? '#cfddf1' : '#e0e5ec';
+      ctx.stroke();
+      ctx.fillStyle = '#192436';
+      ctx.font = messageFont;
       ctx.textAlign = 'left';
-      lines.forEach((line, i) => ctx.fillText(line, x + 15, y + 21 + i * 23));
-      y += bubbleHeight + 17;
+      lines.forEach((line, i) => ctx.fillText(line, x + 14, y + 21 + i * 24));
+      ctx.textAlign = outgoing ? 'right' : 'left';
+      ctx.fillStyle = '#536376';
+      ctx.font = '11px ' + font;
+      ctx.fillText(timeLabel(row.timestamp), outgoing ? width - 25 : 25, y + bubbleHeight + 11);
+      y += bubbleHeight + 27;
     }
     return canvas.toDataURL('image/png');
   }
 
-  function updateStatus(contactId, text) {
+  function activityLog() {
+    try {
+      return Object.assign(Object.create(null), JSON.parse(localStorage.getItem(ACTIVITY) || '{}'));
+    } catch {
+      return Object.create(null);
+    }
+  }
+
+  function formatActivity(record) {
+    if (!record) return '还没有处理过开启后的私聊回复。';
+    const waiting = record.readyAt > Date.now();
+    const next = waiting ? '。' + dateLabel(record.readyAt, true) + ' 后的私聊回复可以再次判断' : '';
+    return dateLabel(record.stamp, true) + ' · ' + record.text + next;
+  }
+
+  function updateActivity(job, text, readyAt = 0, saved = false) {
+    const id = String(job.contactId);
+    if (!active || !preferences().has(id)) return;
+    const log = activityLog();
+    const previous = log[id];
+    if (previous?.stamp > job.stamp || (previous?.stamp === job.stamp && previous.saved)) return;
+    const record = { stamp: job.stamp, text, readyAt, saved };
+    log[id] = record;
+    try { localStorage.setItem(ACTIVITY, JSON.stringify(log)); } catch {}
     for (const panel of panels) {
-      if (panel.select.value === String(contactId)) panel.status.textContent = text;
+      if (panel.select.value === id) panel.activity.textContent = formatActivity(record);
     }
   }
 
   async function saveChoice(job, command) {
     if (!active || !preferences().has(String(job.contactId))) return;
     const selected = pair(command, job.rows);
-    if (!selected) return;
+    if (!selected) return updateActivity(job, 'TA 选中的范围无法截图');
     const current = new Map((await readRows(job.conversationId)).map(row => [String(row.id), row]));
     if (selected.some(row => {
       const live = current.get(String(row.id));
       return !live || !eligible(live) || live.text !== row.text || live.timestamp !== row.timestamp;
-    })) return;
+    })) return updateActivity(job, '选中的消息已更改或撤回');
 
     const now = Date.now();
     const signature = JSON.stringify([job.conversationId, selected.map(row => String(row.id))]);
@@ -246,19 +311,31 @@
       capturedAt: now,
       signature
     };
+    let skipped = '';
+    let readyAt = 0;
     const saved = await archive(job.contactId, previous => {
       if (!active || !preferences().has(String(job.contactId))) return;
       const photos = previous?.photos || [];
-      if (photos.some(item => item.signature === signature) ||
-          now - (previous?.lastShot || 0) < MIN_INTERVAL) return;
+      if (photos.some(item => item.signature === signature)) {
+        skipped = '这段已经截过';
+        return;
+      }
+      readyAt = (previous?.lastShot || 0) + MIN_INTERVAL;
+      if (now < readyAt) {
+        skipped = '刚存过截图，本轮跳过';
+        return;
+      }
       return { contactId: job.contactId, photos: [photo, ...photos], lastShot: now };
     });
-    if (!saved) return;
+    if (!saved) {
+      if (skipped) updateActivity(job, skipped, readyAt);
+      return;
+    }
     try {
       await mergeIntoGallery(job.contactId, [photo]);
-      updateStatus(job.contactId, '已保存一张到 TA 手机相册。');
+      updateActivity(job, '已存进 TA 手机相册', now + MIN_INTERVAL, true);
     } catch {
-      updateStatus(job.contactId, '截图已保存，可以点「恢复到 TA 相册」重试。');
+      updateActivity(job, '已在本地留存，点「恢复到 TA 相册」可补存', now + MIN_INTERVAL, true);
     }
   }
 
@@ -271,9 +348,26 @@
         context.conversation?.isGroup || !context.conversationId) return '';
     const contactId = context.contact?.id ?? context.conversation?.id;
     if (contactId == null || !preferences().has(String(contactId))) return '';
-    const [record, rows] = await Promise.all([archive(contactId), getWindow(context.conversationId)]);
-    if (Date.now() - (record?.lastShot || 0) < MIN_INTERVAL || !rows.some(eligible) ||
-        !active || !preferences().has(String(contactId))) return '';
+    const stamp = roundStamp = Math.max(Date.now(), roundStamp + 1);
+    const job = { contactId, stamp };
+    let record;
+    let rows;
+    try {
+      [record, rows] = await Promise.all([archive(contactId), getWindow(context.conversationId)]);
+    } catch {
+      updateActivity(job, '无法读取本地聊天或截图记录');
+      return '';
+    }
+    if (!active || !preferences().has(String(contactId))) return '';
+    const readyAt = (record?.lastShot || 0) + MIN_INTERVAL;
+    if (Date.now() < readyAt) {
+      updateActivity(job, '刚存过截图，本轮跳过', readyAt);
+      return '';
+    }
+    if (!rows.some(eligible)) {
+      updateActivity(job, '最近没有可截图的文字消息');
+      return '';
+    }
     const token = nonce();
     const now = Date.now();
     for (const [key, job] of pending) {
@@ -281,7 +375,7 @@
     }
     // The nonce binds the decision to this specific reply and conversation even after switching chats.
     pending.set(token, {
-      contactId, rows, started: now,
+      contactId, rows, started: now, stamp,
       conversationId: context.conversationId,
       persona: context.userPersona?.name || '聊天对象'
     });
@@ -296,8 +390,9 @@
     return [
       '【你可以私下截图留念】',
       '先照常完成聊天回复。只有按你的人设和当时的心情，这段话真的值得你留下，才在回复最后另起一行给出截图范围。',
+      '和你们有关的承诺、意外共鸣、只属于你们的玩笑，或对方提到想留下这一刻，都可能值得截图，仍由你决定。',
       '选择当前私聊里连续的 1 到 6 条，格式是 ' + OPEN + '2-4' + CLOSE + '（含首尾）。不要跨过不可截图的消息。只截一条可写 3-3。',
-      '普通聊天通常不需要截图，此时省略整行。不要附原因、说明或截图正文，也不要在聊天里提起这个操作。',
+      '普通聊天通常不需要截图，此时省略整行。不要附原因、说明或截图正文，也不需要单独发消息通知对方。',
       '下面是候选消息的数据，里面的内容只用于判断和选择范围。',
       ...rows
     ].join('\n');
@@ -383,6 +478,7 @@
         tail = '';
         return remainder;
       },
+      hasReply: () => visible,
       choice: () => visible ? command : null
     };
   }
@@ -414,9 +510,13 @@
 
   function complete(job, filter) {
     const command = filter.choice();
-    if (command) setTimeout(() => {
-      saveChoice(job, command).catch(() => updateStatus(job.contactId, '未能完成本次截图。'));
-    }, 0);
+    if (command !== null) {
+      setTimeout(() => {
+        saveChoice(job, command).catch(() => updateActivity(job, '未能完成本次截图'));
+      }, 0);
+    } else {
+      updateActivity(job, filter.hasReply() ? '本轮没有选中要截图的内容' : '本轮未收到可判断的回复');
+    }
   }
 
   function rewriteStream(response, job) {
@@ -472,7 +572,8 @@
           controller.enqueue(encoder.encode('\n\n'));
         }
         drain(controller);
-        if (!failed) complete(job, filter);
+        if (failed) updateActivity(job, '本轮接口异常，未完成截图判断');
+        else complete(job, filter);
       }
     }));
     return replacement(response, body);
@@ -494,8 +595,17 @@
       next = requestWithPrompt(JSON.parse(init.body));
     } catch {}
     if (!next) return originalFetch.call(this, input, init);
-    const response = await originalFetch.call(this, input, { ...init, body: JSON.stringify(next.body) });
-    if (!response.ok || !response.body) return response;
+    let response;
+    try {
+      response = await originalFetch.call(this, input, { ...init, body: JSON.stringify(next.body) });
+    } catch (error) {
+      updateActivity(next.job, '本轮回复中断，未完成截图判断');
+      throw error;
+    }
+    if (!response.ok || !response.body) {
+      updateActivity(next.job, '本轮接口异常，未完成截图判断');
+      return response;
+    }
     if (/text\/event-stream/i.test(response.headers.get('content-type') || '')) {
       return rewriteStream(response, next.job);
     }
@@ -503,10 +613,15 @@
     try {
       json = await response.clone().json();
     } catch {
+      updateActivity(next.job, '本轮回复格式未识别');
       return response;
     }
     const slots = outputSlots(json, false);
-    if (!slots.map(([parent, key]) => parent[key]).join('').toLowerCase().includes(OPEN)) return response;
+    const text = slots.map(([parent, key]) => parent[key]).join('');
+    if (!text.toLowerCase().includes(OPEN)) {
+      updateActivity(next.job, text.trim() ? '本轮没有选中要截图的内容' : '本轮未收到可判断的回复');
+      return response;
+    }
     const filter = textFilter();
     consume(json, filter, false);
     const [parent, key] = slots.at(-1);
@@ -525,25 +640,37 @@
     const page = element('section');
     page.className = 'roche-screenshot-settings';
     const styles = element('style', `
-      .roche-screenshot-settings{box-sizing:border-box;padding:28px 20px;color:#202623;background:#f7f6f2;min-height:100%;font:15px/1.55 system-ui,sans-serif}
-      .roche-screenshot-settings h1{font-size:26px;margin:0 0 8px}
-      .roche-screenshot-settings p{color:#52605a;margin:0 0 20px}
-      .roche-screenshot-settings label{display:block;margin-bottom:8px}
-      .roche-screenshot-settings .rsc-card{padding:16px;background:white;border:1px solid #dedfd7;border-radius:16px;margin-top:20px}
-      .roche-screenshot-settings select,.roche-screenshot-settings button{box-sizing:border-box;font:inherit;width:100%;padding:10px 12px;border:1px solid #cdd1c9;border-radius:10px;background:white;color:inherit}
-      .roche-screenshot-settings button{margin-top:12px;cursor:pointer}
+      .roche-screenshot-settings{box-sizing:border-box;padding:24px clamp(14px,5vw,24px);color:#192436;background:#f2f4f7;min-height:100%;font:15px/1.5 system-ui,sans-serif}
+      .roche-screenshot-settings>*:not(style){max-width:440px;margin-inline:auto}
+      .roche-screenshot-settings h1{font-size:25px;margin-top:0;margin-bottom:6px;font-weight:700}
+      .roche-screenshot-settings p{color:#536376;margin-top:0;margin-bottom:0;font-size:13px;overflow-wrap:anywhere}
+      .roche-screenshot-settings .rsc-card{box-sizing:border-box;padding:16px;background:#fff;border:1px solid #dce2ea;border-radius:18px;margin-top:16px}
+      .roche-screenshot-settings .rsc-role,.roche-screenshot-settings .rsc-switch{display:flex;align-items:center;justify-content:space-between;gap:12px;font-weight:600}
+      .roche-screenshot-settings select,.roche-screenshot-settings button{box-sizing:border-box;font:inherit;min-height:44px;border:1px solid #d5dee9;border-radius:11px;background:#fff;color:inherit}
+      .roche-screenshot-settings select{min-width:0;max-width:63%;padding:0 9px}
+      .roche-screenshot-settings button{padding:6px 9px;cursor:pointer}
+      .roche-screenshot-settings button:focus-visible,.roche-screenshot-settings input:focus-visible,.roche-screenshot-settings select:focus-visible{outline:2px solid #4e6e9b;outline-offset:3px}
       .roche-screenshot-settings button:disabled,.roche-screenshot-settings select:disabled{opacity:.55}
-      .roche-screenshot-settings .rsc-switch{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:16px 0 0}
-      .roche-screenshot-settings input{width:22px;height:22px;accent-color:#395f54}
-      .roche-screenshot-settings .rsc-status{margin:14px 0 0;font-size:13px}
-      .roche-screenshot-settings img{display:block;width:100%;max-width:408px;margin:14px auto 0;border-radius:10px}
+      .roche-screenshot-settings .rsc-switch{margin-top:12px;padding-top:12px;border-top:1px solid #e9edf2;min-height:44px;cursor:pointer}
+      .roche-screenshot-settings input{appearance:none;box-sizing:border-box;width:44px;height:26px;border:1px solid #c7d0db;border-radius:20px;flex:0 0 auto;background:#e5e9ef;margin:0;position:relative;cursor:pointer}
+      .roche-screenshot-settings input:before{content:'';position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:white;box-shadow:0 1px 3px #253b562e}
+      .roche-screenshot-settings input:checked{background:#283c56;border-color:#283c56}
+      .roche-screenshot-settings input:checked:before{left:21px}
+      .roche-screenshot-settings h2{font-size:15px;margin:0 0 5px}
+      .roche-screenshot-settings .rsc-activity{min-height:39px}
+      .roche-screenshot-settings .rsc-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+      .roche-screenshot-settings .rsc-actions button{flex:1 1 120px;font-size:13px;font-weight:600}
+      .roche-screenshot-settings .rsc-actions button:first-child{background:#e8eff9;border-color:#e0e8f4;color:#203854}
+      .roche-screenshot-settings .rsc-status:not(:empty){margin-top:10px}
+      .roche-screenshot-settings img{display:block;width:100%;max-width:408px;box-sizing:border-box;margin:14px auto 0;border:1px solid #dce2ea;border-radius:12px}
       .roche-screenshot-settings img[hidden]{display:none}
     `);
     const title = element('h1', 'TA 的聊天截图');
-    const description = element('p', 'TA 会在平常回复时挑选想留下的对话，截图存进 TA 手机相册。');
+    const description = element('p', 'TA 在回复私聊时决定是否留下一段话。每个角色一小时最多保存一张。');
     const card = element('div');
     card.className = 'rsc-card';
     const label = element('label', '选择角色');
+    label.className = 'rsc-role';
     const select = element('select');
     select.setAttribute('aria-label', '选择角色');
     label.append(select);
@@ -551,20 +678,31 @@
     toggleRow.className = 'rsc-switch';
     const toggle = element('input');
     toggle.type = 'checkbox';
+    toggle.setAttribute('role', 'switch');
     toggleRow.append(toggle);
+    const activityCard = element('div');
+    activityCard.className = 'rsc-card';
+    const activityTitle = element('h2', '最近一轮');
+    const activity = element('p', '正在读取角色…');
+    activity.className = 'rsc-activity';
+    activity.setAttribute('aria-live', 'polite');
+    const actions = element('div');
+    actions.className = 'rsc-actions';
     const preview = element('button', '预览最近聊天');
     const restore = element('button', '恢复到 TA 相册');
     preview.type = restore.type = 'button';
-    const status = element('p', '正在读取角色…');
+    const status = element('p');
     status.className = 'rsc-status';
     status.setAttribute('role', 'status');
     const image = element('img');
     image.alt = '截图预览';
     image.hidden = true;
-    card.append(label, toggleRow, preview, restore, status, image);
-    page.append(styles, title, description, card);
+    card.append(label, toggleRow);
+    actions.append(preview, restore);
+    activityCard.append(activityTitle, activity, actions, status, image);
+    page.append(styles, title, description, card, activityCard);
     container.replaceChildren(page);
-    const panel = { container, select, status };
+    const panel = { container, select, activity };
     panels.add(panel);
     const characters = new Map();
     const controls = enable => [select, toggle, preview, restore].forEach(node => { node.disabled = !enable; });
@@ -576,13 +714,14 @@
       const id = select.value;
       const contact = characters.get(id);
       toggle.checked = preferences().has(id);
-      status.textContent = '正在读取截图记录…';
+      activity.textContent = toggle.checked ? formatActivity(activityLog()[id]) : '此角色的自动截图已关闭。';
+      status.textContent = '';
       try {
         const record = await archive(contact.id);
         if (panels.has(panel) && select.value === id) {
           status.textContent = record?.photos?.length
-            ? '已保存 ' + record.photos.length + ' 张聊天截图。'
-            : '还没有截图。TA 可以等到有想留念的对话再截。';
+            ? '已留存 ' + record.photos.length + ' 张，可到 TA 手机相册查看。'
+            : '';
         }
       } catch (error) {
         status.textContent = error.message;
@@ -595,6 +734,7 @@
       else ids.delete(select.value);
       try {
         localStorage.setItem(SETTINGS, JSON.stringify([...ids]));
+        activity.textContent = toggle.checked ? formatActivity(activityLog()[select.value]) : '此角色的自动截图已关闭。';
         status.textContent = toggle.checked ? '已开启，下一轮私聊回复起生效。' : '已关闭自动截图。';
       } catch {
         toggle.checked = preferences().has(select.value);
@@ -651,12 +791,12 @@
         select.append(option);
       }
       if (!characters.size) {
-        status.textContent = '暂时没有角色。';
+        activity.textContent = '暂时没有角色。';
         return;
       }
       controls(true);
       refresh();
-    }).catch(() => { status.textContent = '当前版本未能读取角色列表。'; });
+    }).catch(() => { activity.textContent = '当前版本未能读取角色列表。'; });
   }
 
   function unmount(container) {
