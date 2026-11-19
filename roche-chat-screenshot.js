@@ -5,7 +5,7 @@
   window.RocheChatScreenshot?.destroy?.();
 
   const ID = 'roche-chat-screenshot';
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const SETTINGS = ID + '.characters';
   const ACTIVITY = ID + '.activity';
   const ARCHIVE = 'RocheChatScreenshotArchive';
@@ -34,9 +34,16 @@
     return window.Roche.memory.getShortTerm({ conversationId, limit: 60 });
   }
 
+  function screenshotText(row) {
+    if (typeof row.text !== 'string') return '';
+    if (row.isMe) return row.text;
+    return row.text.replace(/『翻译[：:][\s\S]*?』/g, '').trimEnd();
+  }
+
   function eligible(row) {
-    return row.id != null && row.type === 'text' && typeof row.text === 'string' &&
-      row.text.trim() && row.text.length <= MAX_MESSAGE && Number(row.timestamp) > 0 &&
+    const text = screenshotText(row);
+    return row.id != null && row.type === 'text' &&
+      text.trim() && text.length <= MAX_MESSAGE && Number(row.timestamp) > 0 &&
       !row.isSystem && !row.isRecalled && !row.isHidden && !row.hidden &&
       !['offline', 'sms', 'junk_sms'].includes(row.source);
   }
@@ -176,7 +183,7 @@
     let previousDay;
     const bubbles = rows.map(row => {
       ctx.font = messageFont;
-      const lines = textLines(ctx, row.text, 294);
+      const lines = textLines(ctx, screenshotText(row), 294);
       const width = Math.max(48, Math.ceil(Math.max(...lines.map(line => ctx.measureText(line).width))) + 28);
       const day = dateLabel(row.timestamp);
       const date = day === previousDay ? null : day;
@@ -296,7 +303,8 @@
     const current = new Map((await readRows(job.conversationId)).map(row => [String(row.id), row]));
     if (selected.some(row => {
       const live = current.get(String(row.id));
-      return !live || !eligible(live) || live.text !== row.text || live.timestamp !== row.timestamp;
+      return !live || !eligible(live) || live.isMe !== row.isMe ||
+        screenshotText(live) !== screenshotText(row) || live.timestamp !== row.timestamp;
     })) return updateActivity(job, '选中的消息已更改或撤回');
 
     const now = Date.now();
@@ -385,7 +393,7 @@
 
   function promptFor(job) {
     const rows = job.rows.map((row, index) => (index + 1) + ' ' + (eligible(row)
-      ? (row.isMe ? '对方 ' : '你 ') + JSON.stringify(row.text)
+      ? (row.isMe ? '对方 ' : '你 ') + JSON.stringify(screenshotText(row))
       : '［不可截图的消息］'));
     return [
       '【你可以私下截图留念】',
