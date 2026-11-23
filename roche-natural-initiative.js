@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.5.0
+/* Roche 自然主动 v1.5.1
  * Enhance browser Director DMs and group activity. Adaptive DM mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,12 +6,12 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.0', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.1', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
  const cfg={...defaults,...saved.config}, records=saved.records||{};
- let active=true, observer, queued=false, last='已就绪，等待下一次开口机会。', matched=0, bridge=null, bridgePromise=null, bridgeAttempted=false, bridgeDetail='', ticking=false, trial=null;
+ let active=true, observer, queued=false, last='已就绪，等待下一次开口机会。', matched=0, bridge=null, bridgePromise=null, bridgeRetryAt=0, bridgeDetail='', ticking=false, trial=null;
  const panels=new Set(), pending=new Set(), automatic=new Map(),groupMatched=new Map();
  let contactSettings=readContactSettings();
  let groupSettings=readGroupSettings();
@@ -268,24 +268,60 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   return !!args&&source.includes('&&void0!=='+args[3]+'){')&&['model:','messages:','temperature:','stream:!1','provider:','endpoint:','apiKey:','payload:','chatId:','charId:','jobKey:','pushType:','chatTitle:','delayMs:'].every(key=>source.includes(key));
  }
  function isNativeState(state){return !!state&&typeof state==='object'&&Array.isArray(state.conversations)&&Array.isArray(state.contacts)&&Array.isArray(state.personas)&&state.messages&&typeof state.messages==='object';}
- async function loadBridge(){
-  if(bridge)return bridge;if(bridgePromise)return bridgePromise;if(bridgeAttempted)return null;bridgeAttempted=true;
+ const corePath=/\/ai-core-[\w-]+\.js$/;
+ const loaderPath=/\/(?:index|access-bootstrap|App|verifiedRuntime|ChatSettings)-[\w-]+\.js$/;
+ const verifiedBuilds={'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ'],'ai-core-D1y7ffXM.js':['w','dZ']};
+ function observedAssets(){
+  const paths=[...document.querySelectorAll('script[src],link[href]')].map(el=>el.src||el.href);
+  paths.push(...(performance.getEntriesByType?.('resource')||[]).map(entry=>entry.name));
+  return [...new Set(paths.flatMap(path=>{
+   try{const url=new URL(path,location.href);return url.origin===location.origin&&(corePath.test(url.pathname)||loaderPath.test(url.pathname))?[url.href]:[];}
+   catch{return [];}
+  }))].reverse();
+ }
+ async function findCoreFromLoaders(assets){
+  // Safari may no longer list an early module in Resource Timing. Follow the same site's loaded app assets.
+  const todo=assets.filter(url=>loaderPath.test(new URL(url).pathname));
+  const seen=new Set();
+  while(todo.length&&seen.size<5){
+   const url=todo.shift();
+   if(seen.has(url))continue;
+   seen.add(url);
+   try{
+    const response=await original.call(window,url,{signal:globalThis.AbortSignal?.timeout?.(3500)});
+    if(!response.ok)continue;
+    const source=await response.text();
+    const core=source.match(/["']\.\/(ai-core-[\w-]+\.js)["']/)?.[1];
+    if(core)return new URL('./'+core,url).href;
+    for(const match of source.matchAll(/["']\.\/((?:access-bootstrap|App|verifiedRuntime)-[\w-]+\.js)["']/g))todo.push(new URL('./'+match[1],url).href);
+   }catch{}
+  }
+  return null;
+ }
+ async function loadBridge(force=false){
+  if(bridge)return bridge;
+  if(bridgePromise)return bridgePromise;
+  if(!force&&Date.now()<bridgeRetryAt)return null;
   bridgePromise=(async()=>{
-  const loaded=[...document.querySelectorAll('script[src],link[href]')].map(el=>el.src||el.href).concat(performance.getEntriesByType('resource').map(r=>r.name));
-  const entries=[...new Set(loaded)].filter(s=>{try{const url=new URL(s,location.href);return url.origin===location.origin&&/\/ai-core-[\w-]+\.js$/.test(url.pathname);}catch{return false;}}).reverse().slice(0,3);
-  if(!entries.length){bridgeDetail='未找到已加载的私聊模块；请先打开一次角色聊天再检查。';return null;}
-  for(const entry of entries)try{
-   const module=await import(entry),name=new URL(entry,location.href).pathname.split('/').pop();
-   // Explicit adapters also keep isolated compatibility fixtures possible.
-   const verified={'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ']},adapter=verified[name];
-   if(adapter&&isNativeState(module[adapter[0]])&&typeof module[adapter[1]]==='function'){bridge={state:module[adapter[0]],run:module[adapter[1]],build:name};break;}
-   const values=Object.values(module),states=[...new Set(values.filter(isNativeState))],runners=[...new Set(values.filter(isNativeRunner))];
-   if(states.length===1&&runners.length===1){bridge={state:states[0],run:runners[0],build:name};break;}
-   bridgeDetail='已加载 '+name+'，但私聊函数特征未通过核对；未调用模型。';
-  }catch{bridgeDetail='私聊模块读取失败；请刷新网页后重试。';}
-  if(bridge)bridgeDetail='已识别原生私聊接口 · '+bridge.build;
-  return bridge;
-  })();try{return await bridgePromise;}finally{bridgePromise=null;}
+   const assets=observedAssets();
+   const entries=assets.filter(url=>corePath.test(new URL(url).pathname)).slice(0,3);
+   if(!entries.length){const recovered=await findCoreFromLoaders(assets);if(recovered)entries.push(recovered);}
+   bridgeDetail=entries.length?'无法接入当前版本的聊天模块，点“检查接入”可重试。':'暂未找到聊天模块，点“检查接入”可重试。';
+   for(const entry of entries)try{
+    const module=await import(entry),name=new URL(entry).pathname.split('/').pop();
+    const adapter=verifiedBuilds[name];
+    let state,run;
+    if(adapter&&isNativeState(module[adapter[0]])&&typeof module[adapter[1]]==='function'){
+     [state,run]=adapter.map(key=>module[key]);
+    }else{
+     const values=Object.values(module),states=[...new Set(values.filter(isNativeState))],runners=[...new Set(values.filter(isNativeRunner))];
+     if(states.length===1&&runners.length===1){[state]=states;[run]=runners;}
+    }
+    if(state&&active){bridge={state,run,build:name};bridgeDetail='已识别原生私聊接口 · '+name;return bridge;}
+   }catch{}
+   return null;
+  })();
+  try{return await bridgePromise;}finally{bridgePromise=null;bridgeRetryAt=Date.now()+3000;}
  }
  async function adaptiveTick(){
   if(!active||!cfg.enabled||!cfg.realistic||ticking||trial?.busy||quietNow())return;
@@ -406,7 +442,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   const previous=select.value||String(conversationInfo(core,activeConversation)?.char.id||'');
   const contacts=core.state.contacts.filter(c=>c.id!==undefined&&c.id!==null&&c.name&&!c.isGroup&&c.type!=='group');
   const signature=JSON.stringify(contacts.map(c=>[String(c.id),c.name,c.handle||'']));
-  if(select.dataset.contacts!==signature){
+  if(contacts.length&&select.dataset.contacts!==signature){
    select.replaceChildren();
    for(const char of contacts){
     const option=document.createElement('option');option.value=String(char.id);
@@ -415,27 +451,40 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    }
    select.dataset.contacts=signature;
   }
+  if(!contacts.length)setListPlaceholder(select,'暂无联系人');
   if([...select.options].some(option=>option.value===previous))select.value=previous;
   select.disabled=!contacts.length;
   paintContact(root);
+ }
+ function setListPlaceholder(select,label){
+  if(select.options.length===1&&!select.options[0].value&&select.options[0].textContent===label)return;
+  const option=document.createElement('option');option.value='';option.textContent=label;
+  select.replaceChildren(option);
+  delete select.dataset.contacts;delete select.dataset.groups;
+  select.disabled=true;
  }
  function paintContact(root){
   const select=root.querySelector('[data-contact-target]'),toggle=root.querySelector('[data-contact-enabled]'),hint=root.querySelector('[data-contact-note]');
   const id=select.value,char=bridge?.state.contacts.find(c=>String(c.id)===id);
   toggle.disabled=!char;toggle.checked=!!char&&contactEnabled(id);
   toggle.setAttribute('aria-label',char?'对 '+char.name+' 启用自然主动':'对所选联系人启用自然主动');
-  if(!char){hint.textContent=bridge?'请先添加 char 联系人。':'正在读取联系人；未显示时先打开一次角色聊天，再点“检查接入”。';return;}
+  if(!char){
+   if(!bridge)setListPlaceholder(select,bridgePromise||!bridgeDetail?'正在读取联系人…':'未接入聊天数据');
+   hint.textContent=bridge?'系统暂未提供联系人。':'可点下方“检查接入”重新读取。';return;
+  }
   hint.textContent=char.name+(toggle.checked?' 已开启自然主动。':' 已关闭自然主动，沿用系统漫谈设置。')+(!cfg.enabled?' 总开关已关闭，此联系人的选择已保存。':'');
  }
  function paintGroups(root,core){
   const select=root.querySelector('[data-group-target]'),toggle=root.querySelector('[data-group-enabled]'),hint=root.querySelector('[data-group-note]');if(!select)return;
   const groups=(core?.state.conversations||[]).filter(isGroup),previous=select.value||String(core?.state.aiRequestState?.activeConversationId||'');
   const signature=JSON.stringify(groups.map(group=>[String(group.id),group.name||'群聊']));
-  if(select.dataset.groups!==signature){select.replaceChildren();for(const group of groups){const option=document.createElement('option');option.value=String(group.id);option.textContent=group.name||'群聊 '+String(group.id).slice(-6);select.append(option);}select.dataset.groups=signature;}
+  if(groups.length&&select.dataset.groups!==signature){select.replaceChildren();for(const group of groups){const option=document.createElement('option');option.value=String(group.id);option.textContent=group.name||'群聊 '+String(group.id).slice(-6);select.append(option);}select.dataset.groups=signature;}
+  if(!groups.length)setListPlaceholder(select,core?'暂无群聊':bridgePromise||!bridgeDetail?'正在读取群聊…':'未接入聊天数据');
   if([...select.options].some(option=>option.value===previous))select.value=previous;
   const group=groups.find(value=>String(value.id)===select.value);select.disabled=!groups.length;toggle.disabled=!group;toggle.checked=!!group&&groupEnabled(group.id);
   toggle.setAttribute('aria-label',group?'对群聊 '+(group.name||'此群')+' 启用自然主动':'对所选群聊启用自然主动');
-  if(!group){hint.textContent=core?'暂无群聊，请先打开一次群聊再检查。':'请先打开一次群聊，再点“检查接入”。';return;}
+  if(!group){hint.textContent=core?'系统暂未提供群聊。':'可点下方按钮重新读取。';return;}
+  if(group.localSettings?.autonomousStrategy?.enabled){hint.textContent=(group.name||'此群')+'已启用系统「自主策略」。要使用插件，请关闭自主策略，再开启群漫谈。';return;}
   const persona=core.state.personas.find(value=>String(value.id)===String(group.localSettings?.myActivePersonaId||core.state.activePersonaId));
   const rec=records[groupRecordKey(String(group.id),String(persona?.id||''))],minutes=rec?Math.max(0,Math.ceil((rec.next-Date.now())/60000)):0;
   hint.textContent=(group.name||'此群')+(toggle.checked?'：自然主动已开启。':'：自然主动已关闭，沿用原系统群漫谈。')+(group.localSettings?.groupActivity?.enabled?' 原系统群漫谈已开启。':' 请先在本群设置开启“启用群漫谈”。')+' 已识别本群 '+(groupMatched.get(String(group.id))||0)+' 次检查。'+(toggle.checked&&minutes?' 下次最早约 '+minutes+' 分钟后再判断。':'')+(!cfg.enabled?' 当前插件总开关已关闭。':'');
@@ -453,19 +502,29 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  async function inspect(root){
   const button=root.querySelector('[data-inspect]');button.disabled=true;
   try{
-   if(!bridge)bridgeAttempted=false;
-   const core=await loadBridge();if(core)fillContacts(root,core);else paintContact(root);paintGroups(root,core);
+   const core=await loadBridge(true);if(core)fillContacts(root,core);else paintContact(root);paintGroups(root,core);
    const info=core?fillTargets(root,core):null;
+   const autonomous=info?.conv.localSettings?.autonomousStrategy?.enabled===true;
    const cloud=localStorage.getItem('noir_webpush_char_activity_enabled')==='true';
    const rows=[['自然主动',cfg.enabled?'已开启':'请先打开上方总开关',cfg.enabled],['网页接入',core?'已适配，可试运行':bridgeDetail||'未适配此版本，暂不能手动试运行',!!core],['原会话漫谈',info?(info.conv.localSettings?.directMessageActivity?.enabled?'已开启 · '+info.char.name:'请先开启此角色的“启用漫谈”'):core?'暂无可用私聊，请先打开一次角色聊天':'待网页接入后读取',!!info?.conv.localSettings?.directMessageActivity?.enabled],['勿扰时段',quietNow()?'当前勿扰，不会试运行':'当前可检查',!quietNow()],['云端定时',cloud?'已开启；单次测试可用，真人自动调度需关闭':'未开启',!cloud]];
    rows.splice(1,0,['所选联系人',info?(contactEnabled(String(info.char.id))?'已开启 · '+info.char.name:'已关闭 · '+info.char.name):'请先选择有私聊记录的联系人',!!info&&contactEnabled(String(info.char.id))]);
+   if(autonomous)rows.splice(3,1,['系统自主策略','已开启。使用插件前，请关闭它，再开启原漫谈。',false]);
    if(cfg.realistic)rows.push(['多窗口协调',navigator.locks?.request?'支持':'此浏览器暂不支持',!!navigator.locks?.request]);
    const box=root.querySelector('[data-report]');box.replaceChildren();box.hidden=false;
    for(const [label,value,ok] of rows){const row=document.createElement('div');row.className='ni-report-row';row.dataset.ok=ok;const a=document.createElement('span'),b=document.createElement('span');a.textContent=label;b.textContent=value;row.append(a,b);box.append(row);}
-   for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||!contactEnabled(String(info.char.id))||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
+   for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||autonomous||!contactEnabled(String(info.char.id))||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
    return {core,info,cloud};
   }catch{const box=root.querySelector('[data-report]');box.hidden=false;box.textContent='检查未完成，请刷新页面后再试。';for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;return {};}
   finally{button.disabled=false;}
+ }
+ async function initializeLists(root){
+  await inspect(root);
+  for(const delay of [1000,2500,5000]){
+   if(root.querySelector('[data-contact-target]').value&&root.querySelector('[data-group-target]').value)return;
+   await new Promise(resolve=>setTimeout(resolve,delay));
+   if(!active||!root.isConnected||!panels.has(root))return;
+   if(!root.querySelector('[data-inspect]').disabled)await inspect(root);
+  }
  }
  function paintTrial(){
   for(const root of panels){const el=root.querySelector('[data-trial]');el.hidden=!trial;if(trial){el.textContent=trial.message;el.dataset.phase=trial.phase;}const response=root.querySelector('[data-response]');response.hidden=!trial?.preview;root.querySelector('[data-response-text]').textContent=trial?.preview||'';if(trial?.busy)for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;}
@@ -473,7 +532,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  async function testOnce(root,mode='send'){
   if(trial?.busy||ticking){note('已有一次检查正在处理，请等它结束后再试。');return;}
   const {core,info}=await inspect(root);
-  if(!active||!core||!info||!cfg.enabled||!contactEnabled(String(info.char.id))||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
+  if(!active||!core||!info||!cfg.enabled||info.conv.localSettings?.autonomousStrategy?.enabled||!contactEnabled(String(info.char.id))||quietNow()||!info.conv.localSettings?.directMessageActivity?.enabled)return;
   if(pending.has(info.key)||core.state.aiRequestState?.typingStatus?.[info.conv.id]){note('这个角色还有请求未结束，请稍后再试。');return;}
   trial={key:info.key,legacyKey:info.legacyKey,contactId:String(info.char.id),mode,busy:true,requests:0,phase:'starting',preview:'',message:'正在读取 '+info.char.name+' 的上下文…'};paintTrial();
   const before=new Set((core.state.messages?.[info.conv.id]||[]).map(m=>m.id));
@@ -518,7 +577,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   root.querySelector('[data-group-refresh]').onclick=()=>inspect(root);
   root.querySelector('[data-test]').onclick=()=>testOnce(root);
   root.querySelector('[data-decision]').onclick=()=>testOnce(root,'decision');
-  panels.add(root);syncPanels();paintPeriods();paintTrial();paintContact(root);root.querySelector('[data-state]').textContent=cfg.enabled?last:'自然主动已关闭，请打开上方总开关。';inspect(root);return root;
+  panels.add(root);syncPanels();paintPeriods();paintTrial();paintContact(root);paintGroups(root,bridge);root.querySelector('[data-state]').textContent=cfg.enabled?last:'自然主动已关闭，请打开上方总开关。';initializeLists(root);return root;
  }
  function syncPanels(){for(const root of panels){for(const input of root.querySelectorAll('[data-key]')){const key=input.dataset.key;if(input.type==='checkbox')input.checked=cfg[key];else input.value=cfg[key];}for(const button of root.querySelectorAll('[data-mode]'))button.setAttribute('aria-pressed',String((button.dataset.mode==='realistic')===cfg.realistic));root.querySelector('[data-normal]').hidden=cfg.realistic;root.querySelector('[data-mode-note]').textContent=cfg.realistic?'让角色根据上下文和生活日程，决定下次适合开口的机会。':'沿用原系统的检查时机，有话才说；发过消息后，给彼此留一点空隙。';root.querySelector('[data-quiet-body]').hidden=!cfg.quiet;root.querySelector('[data-enabled]').dataset.enabled=cfg.enabled;for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;root.querySelector('[data-report]').hidden=true;}}
  function paintPeriods(){for(const p of panels){const box=p.querySelector('[data-periods]');box.replaceChildren();cfg.periods.forEach((range,index)=>{const row=document.createElement('div');row.className='ni-period';for(const key of ['start','end']){const input=document.createElement('input');input.type='time';input.value=range[key];input.setAttribute('aria-label','勿扰时段'+(index+1)+(key==='start'?'开始':'结束'));input.onchange=()=>{if(minute(input.value)===null)return;range[key]=input.value;save();for(const panel of panels)for(const button of panel.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;paintPeriods();};row.append(input);if(key==='start'){const dash=document.createElement('span');dash.className='ni-dash';dash.textContent='—';row.append(dash);}}const remove=document.createElement('button');remove.type='button';remove.className='ni-remove';remove.textContent='×';remove.setAttribute('aria-label','删除勿扰时段'+(index+1));remove.onclick=()=>{cfg.periods.splice(index,1);save();for(const panel of panels)for(const button of panel.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;paintPeriods();};row.append(remove);box.append(row);});p.querySelector('[data-add]').disabled=cfg.periods.length>=12;}}
