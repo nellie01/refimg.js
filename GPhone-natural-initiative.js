@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.5.2
+/* Roche 自然主动 v1.5.3
  * Enhance browser Director DMs and group activity. Adaptive DM mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.2', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.3', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
@@ -270,7 +270,12 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  function isNativeState(state){return !!state&&typeof state==='object'&&Array.isArray(state.conversations)&&Array.isArray(state.contacts)&&Array.isArray(state.personas)&&state.messages&&typeof state.messages==='object';}
  const corePath=/\/ai-core-[\w-]+\.js$/;
  const loaderPath=/\/(?:index|access-bootstrap|App|verifiedRuntime|ChatSettings)-[\w-]+\.js$/;
- const verifiedBuilds={'ai-core-XL_vD4_9.js':['w','dZ'],'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ'],'ai-core-D1y7ffXM.js':['w','dZ']};
+ const verifiedBuilds={'ai-core-CLmcR849.js':['w','dZ'],'ai-core-XL_vD4_9.js':['w','dZ'],'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ'],'ai-core-D1y7ffXM.js':['w','dZ']};
+ async function beforeTimeout(task,milliseconds){
+  let timer;
+  try{return await Promise.race([task,new Promise(resolve=>{timer=setTimeout(()=>resolve(null),milliseconds);})]);}
+  finally{clearTimeout(timer);}
+ }
  function observedAssets(){
   const paths=[...document.querySelectorAll('script[src],link[href]')].map(el=>el.src||el.href);
   paths.push(...(performance.getEntriesByType?.('resource')||[]).map(entry=>entry.name));
@@ -305,10 +310,12 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   bridgePromise=(async()=>{
    const assets=observedAssets();
    const entries=assets.filter(url=>corePath.test(new URL(url).pathname)).slice(0,3);
-   if(!entries.length){const recovered=await findCoreFromLoaders(assets);if(recovered)entries.push(recovered);}
+   if(!entries.length){const recovered=await beforeTimeout(findCoreFromLoaders(assets),5500);if(recovered)entries.push(recovered);}
    bridgeDetail=entries.length?'无法接入当前版本的聊天模块，点“检查接入”可重试。':'暂未找到聊天模块，点“检查接入”可重试。';
    for(const entry of entries)try{
-    const module=await import(entry),name=new URL(entry).pathname.split('/').pop();
+    const name=new URL(entry).pathname.split('/').pop();
+    const module=await beforeTimeout(import(entry),4000);
+    if(!module){bridgeDetail='读取聊天模块超时，请稍后重试。';continue;}
     const adapter=verifiedBuilds[name];
     let state,run;
     if(adapter&&isNativeState(module[adapter[0]])&&typeof module[adapter[1]]==='function'){
@@ -500,9 +507,16 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   select.hidden=conversations.length<=1;return conversationInfo(core,core.state.conversations.find(c=>String(c.id)===select.value));
  }
  async function inspect(root){
-  const button=root.querySelector('[data-inspect]');button.disabled=true;
+  const button=root.querySelector('[data-inspect]'),groupButton=root.querySelector('[data-group-refresh]');
+  if(button.disabled)return {};
+  const checkLabel=button.textContent,groupLabel=groupButton.textContent;
+  const box=root.querySelector('[data-report]'),groupNote=root.querySelector('[data-group-note]');
+  button.disabled=groupButton.disabled=true;
+  button.textContent=groupButton.textContent='正在检查…';
+  box.hidden=false;box.textContent='正在读取联系人和群聊…';
   try{
    const core=await loadBridge(true);if(core)fillContacts(root,core);else paintContact(root);paintGroups(root,core);
+   if(!core)groupNote.textContent=bridgeDetail||'暂时无法读取群聊，请重试。';
    const info=core?fillTargets(root,core):null;
    const autonomous=info?.conv.localSettings?.autonomousStrategy?.enabled===true;
    const cloud=localStorage.getItem('noir_webpush_char_activity_enabled')==='true';
@@ -510,12 +524,15 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    rows.splice(1,0,['所选联系人',info?(contactEnabled(String(info.char.id))?'已开启 · '+info.char.name:'已关闭 · '+info.char.name):'请先选择有私聊记录的联系人',!!info&&contactEnabled(String(info.char.id))]);
    if(autonomous)rows.splice(3,1,['系统自主策略','已开启。使用插件前，请关闭它，再开启原漫谈。',false]);
    if(cfg.realistic)rows.push(['多窗口协调',navigator.locks?.request?'支持':'此浏览器暂不支持',!!navigator.locks?.request]);
-   const box=root.querySelector('[data-report]');box.replaceChildren();box.hidden=false;
+   box.replaceChildren();
    for(const [label,value,ok] of rows){const row=document.createElement('div');row.className='ni-report-row';row.dataset.ok=ok;const a=document.createElement('span'),b=document.createElement('span');a.textContent=label;b.textContent=value;row.append(a,b);box.append(row);}
    for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=!!trial?.busy||!active||!cfg.enabled||!core||!info||autonomous||!contactEnabled(String(info.char.id))||!info.conv.localSettings?.directMessageActivity?.enabled||quietNow();
    return {core,info,cloud};
-  }catch{const box=root.querySelector('[data-report]');box.hidden=false;box.textContent='检查未完成，请刷新页面后再试。';for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;return {};}
-  finally{button.disabled=false;}
+  }catch{box.textContent=groupNote.textContent='检查未完成，请重试。';for(const button of root.querySelectorAll('[data-test],[data-decision]'))button.disabled=true;return {};}
+  finally{
+   button.disabled=groupButton.disabled=false;
+   button.textContent=checkLabel;groupButton.textContent=groupLabel;
+  }
  }
  async function initializeLists(root){
   await inspect(root);
