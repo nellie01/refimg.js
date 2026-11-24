@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.5.4
+/* Roche 自然主动 v1.5.5
  * Enhance browser Director DMs and group activity. Adaptive DM mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', GROUP_CHECK_KEY=KEY+'.groupChecks', VERSION='1.5.4', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', GROUP_CHECK_KEY=KEY+'.groupChecks', VERSION='1.5.5', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
@@ -20,7 +20,7 @@
  const memberId=member=>String(member&&typeof member==='object'?member.id:member);
  const groupEnabled=id=>id!==undefined&&id!==null&&groupSettings[String(id)]!==false;
  const groupRecordKey=(id,persona)=>hash('group:'+id+'\n'+persona);
- const groupMessageLimit=6;
+
  let groupChecks=readGroupChecks();
  function readGroupChecks(){
   try{return new Map(JSON.parse(localStorage.getItem(GROUP_CHECK_KEY)||'[]'));}
@@ -152,7 +152,7 @@
 2. 有成员说去工作、洗澡、上课、睡觉、赶路或稍后再聊，就让他合理地离开。不要过一阵就追问“人呢/怎么不回/在干嘛”，不要把群里安静解释成冷落。睡觉、忙碌或专注的成员不参与；其他空闲成员可以自然接话，不必每轮都 cue 用户。
 3. 可以承接本群未完的话题、约定或前文已经发生的事情。${cfg.sharing?'允许空闲成员基于已有场景，分享一句生活细节，或让另一名成员简短接话；不要为凑热闹编造重大事件、真实新闻、搜索结果或其他人的行为。':'只承接已知事件与话题，不自行制造新事件。'} 不凭空改变地点，不让所有成员轮流报到。
 4. 近期已经说过的话不换个说法重发；不要固定问候、机械接龙或表演式自问自答。用户没回应时不反复追问。用户上次发言后，本插件已观察到 ${rec.rounds||0} 轮主动内容；达到本插件上限后留出空间。
-5. 有话题能聊开时，让合适的成员互相接话、回应细节或追问，通常输出 3 至 ${groupMessageLimit} 个气泡。只有一两句说得通也可以收住。允许个别成员把一件有意思的事说完整，其他成员按性格回应，别把对话切成一串单字或表情。保留原系统 [消息]/[回复]/[语音]/[表情]/[图片] 姓名：正文 格式、语言与翻译设置。不要解释判断过程，不输出 [心声]、计划、报告或 JSON。不为主动而强制配图。
+5. 有话题能聊开时，让合适的成员互相接话、回应细节或追问，话题自然结束时收住。本轮条数由对话决定，忽略前文对群消息数量的要求。允许个别成员把一件有意思的事说完整，其他成员按性格回应，别把对话切成一串单字或表情。保留原系统 [消息]/[回复]/[语音]/[表情]/[图片] 姓名：正文 格式、语言与翻译设置。不要解释判断过程，不输出 [心声]、计划、报告或 JSON。不为主动而强制配图。
 ${cfg.realistic?'真人模式：结合成员各自作息、约定与前文进展，在末尾另起一行给出 [下次检查:分钟数]，15至720分钟；它是下次最早考虑发言的时间。原系统下次检查到来后仍可继续安静，此行不会发送到群里。':''}
 单纯过去了一段时间，不是新的聊天动机。\n`;}
  function rules(meta,rec){
@@ -218,7 +218,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    const tag=meta.kind==='group'&&/^(回复|语音|表情)$/.test(match[1])?match[1]:image?'图片':'消息';
    accepted.push('['+tag+'] '+(meta.kind==='group'?speaker:meta.char)+'：'+match[3].trim());
   }
-  return {text:accepted.slice(0,isMessageTest(meta)?1:meta.kind==='group'?groupMessageLimit:2).join('\n'),reason:accepted.length?'content':valid&&repeated===valid?'duplicate':'format'};
+  return {text:(meta.kind==='group'?accepted:accepted.slice(0,isMessageTest(meta)?1:2)).join('\n'),reason:accepted.length?'content':valid&&repeated===valid?'duplicate':'format'};
  }
  function rewriteReply(p,meta,depth=0,limit={sent:0}){
   if(!p||typeof p!=='object'||depth>3)return {body:p,known:false,has:false};
