@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.5.3
+/* Roche 自然主动 v1.5.4
  * Enhance browser Director DMs and group activity. Adaptive DM mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.3', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', GROUP_CHECK_KEY=KEY+'.groupChecks', VERSION='1.5.4', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
@@ -20,6 +20,20 @@
  const memberId=member=>String(member&&typeof member==='object'?member.id:member);
  const groupEnabled=id=>id!==undefined&&id!==null&&groupSettings[String(id)]!==false;
  const groupRecordKey=(id,persona)=>hash('group:'+id+'\n'+persona);
+ const groupMessageLimit=6;
+ let groupChecks=readGroupChecks();
+ function readGroupChecks(){
+  try{return new Map(JSON.parse(localStorage.getItem(GROUP_CHECK_KEY)||'[]'));}
+  catch{return new Map();}
+ }
+ function recordGroupCheck(id,result){
+  const next=readGroupChecks();
+  for(const [key,value] of groupChecks)if(!next.has(key))next.set(key,value);
+  next.set(String(id),{at:Date.now(),result});
+  groupChecks=new Map([...next].sort((a,b)=>Number(b[1]?.at)-Number(a[1]?.at)).slice(0,100));
+  try{localStorage.setItem(GROUP_CHECK_KEY,JSON.stringify([...groupChecks]));}catch{}
+  for(const root of panels)paintGroups(root,bridge);
+ }
  function setGroupEnabled(id,enabled){
   if(!bridge?.state.conversations.some(conv=>isGroup(conv)&&String(conv.id)===String(id)))return;
   const next={...readGroupSettings(),[String(id)]:enabled};
@@ -48,6 +62,7 @@
   note((char?.name||'此联系人')+(enabled?'：自然主动已开启。':'：自然主动已关闭，沿用系统漫谈设置。'));
  }
  function onContactStorage(event){
+  if(event.key===GROUP_CHECK_KEY||event.key===null){groupChecks=readGroupChecks();for(const root of panels)paintGroups(root,bridge);}
   if(event.key===GROUP_KEY||event.key===null){groupSettings=readGroupSettings();for(const root of panels)paintGroups(root,bridge);}
   if(event.key!==CONTACT_KEY&&event.key!==null)return;
   contactSettings=readContactSettings();
@@ -66,22 +81,35 @@
  function identifyGroup(p,requestedId){
   const system=systemText(p);
   if(!system.includes('【沉浸式虚拟群聊的导演/上帝视角】')||!system.includes('【可用指令与格式 - 严格遵守】')||!bridge)return null;
+  const {conversations,contacts,personas,activePersonaId,messages}=bridge.state;
   const text=[system,...(p.messages||[]).filter(m=>m.role==='user').map(m=>textOf(m.content)),...(p.contents||[]).filter(m=>m.role==='user').map(m=>textOf(m.parts)),...(Array.isArray(p.input)?p.input:[]).filter(m=>m.role==='user').map(m=>textOf(m.content))].join('\n');
-  if(!text.includes('【群成员详细档案】')||!text.includes('【近期聊天记录】'))return null;
-  const profiles=text.split('【群成员详细档案】')[1]?.split('【世界观/设定】')[0]||'';
-  const listed=[...profiles.matchAll(/^\s*###\s+(.+?)\s+\(([^\n()]*)\)([^\n]*)/gm)].map(match=>({name:match[1].trim(),handle:match[2].trim(),user:/用户\/User/.test(match[3])}));
-  const actors=listed.filter(profile=>!profile.user).map(profile=>bridge.state.contacts.find(char=>char.name===profile.name&&String(char.handle||'')===profile.handle)).filter(Boolean);
-  const ids=[...new Set(actors.map(char=>String(char.id)))].sort();if(!ids.length)return null;
-  const memory=text.split('【近期聊天记录】')[1].split('[Mention Rule]')[0].replace(/\[系统注：[^\]]*\]/g,'').trim();
-  let groups=bridge.state.conversations.filter(conv=>isGroup(conv)&&JSON.stringify([...new Set((conv.members||[]).map(memberId).filter(id=>bridge.state.contacts.some(char=>String(char.id)===id)))].sort())===JSON.stringify(ids));
-  if(requestedId!==undefined&&requestedId!==null)groups=groups.filter(conv=>String(conv.id)===String(requestedId));
-  else if(groups.length>1){
-   groups=groups.filter(conv=>{const messages=(bridge.state.messages?.[conv.id]||[]).filter(message=>!message.isSystem&&message.type!=='system_notice');const latest=[...messages].sort((a,b)=>b.timestamp-a.timestamp).find(message=>norm(textOf(message.text||message.content)).length>3);return latest&&norm(memory).includes(norm(textOf(latest.text||latest.content)));});
+  const memory=(text.split('【近期聊天记录】')[1]||'').split('[Mention Rule]')[0].replace(/\[系统注：[^\]]*\]/g,'').trim();
+  const explicit=requestedId!==undefined&&requestedId!==null;
+  const profiles=text.split('【群成员详细档案】')[1]?.split(/【世界观\/设定】|### 用户 \(User\) 信息/)[0]||'';
+  const listed=[...profiles.matchAll(/^\s*###\s+(.+?)\s+\(([^\n()]*)\)([^\n]*)/gm)].filter(match=>!/用户\/User/.test(match[3]));
+  if(!explicit&&(!listed.length||!text.includes('【近期聊天记录】')))return null;
+  const profileKey=(name,handle)=>JSON.stringify([name.trim(),['undefined','null'].includes(handle)?'':handle.trim()]);
+  const profileKeys=[...new Set(listed.map(match=>profileKey(match[1],match[2])))].sort();
+  const membersFor=conv=>{
+   const persona=personas.find(value=>String(value.id)===String(conv.localSettings?.myActivePersonaId||activePersonaId));
+   const actors=[...new Set((conv.members||[]).map(memberId))].filter(id=>id!==String(persona?.id))
+    .map(id=>contacts.find(char=>String(char.id)===id)||personas.find(char=>String(char.id)===id)).filter(actor=>actor?.name);
+   return {conv,persona,actors};
+  };
+  let groups=conversations.filter(conv=>isGroup(conv)&&(!explicit||String(conv.id)===String(requestedId))).map(membersFor);
+  if(!explicit){
+   groups=groups.filter(({actors})=>JSON.stringify([...new Set(actors.map(actor=>profileKey(actor.name,String(actor.handle||''))))].sort())===JSON.stringify(profileKeys));
+   if(groups.length>1)groups=groups.filter(({conv})=>{
+    const recent=[...(messages?.[conv.id]||[])].sort((a,b)=>b.timestamp-a.timestamp);
+    const latest=recent.find(message=>!message.isSystem&&message.type!=='system_notice'&&norm(textOf(message.text||message.content)).length>3);
+    return latest&&norm(memory).includes(norm(textOf(latest.text||latest.content)));
+   });
   }
   if(groups.length!==1)return null;
-  const conv=groups[0],persona=bridge.state.personas.find(value=>String(value.id)===String(conv.localSettings?.myActivePersonaId||bridge.state.activePersonaId));
-  if(!persona?.name||!groupEnabled(conv.id))return null;
-  const speakers=actors.filter(actor=>actors.filter(other=>other.name===actor.name).length===1);
+  const {conv,persona,actors}=groups[0];
+  if(!persona?.name||!groupEnabled(conv.id)||conv.localSettings?.autonomousStrategy?.enabled)return null;
+  const speakers=actors.filter(actor=>actor.name!==persona.name&&actors.filter(other=>other.name===actor.name).length===1);
+  if(!speakers.length)return null;
   const lines=memory.split('\n').map(line=>line.trim()),userLines=lines.filter(line=>line.startsWith(persona.name+':'));
   const key=groupRecordKey(String(conv.id),String(persona.id));
   const latestUser=(bridge.state.messages?.[conv.id]||[]).filter(message=>message.isMe).sort((a,b)=>b.timestamp-a.timestamp)[0];
@@ -124,7 +152,7 @@
 2. 有成员说去工作、洗澡、上课、睡觉、赶路或稍后再聊，就让他合理地离开。不要过一阵就追问“人呢/怎么不回/在干嘛”，不要把群里安静解释成冷落。睡觉、忙碌或专注的成员不参与；其他空闲成员可以自然接话，不必每轮都 cue 用户。
 3. 可以承接本群未完的话题、约定或前文已经发生的事情。${cfg.sharing?'允许空闲成员基于已有场景，分享一句生活细节，或让另一名成员简短接话；不要为凑热闹编造重大事件、真实新闻、搜索结果或其他人的行为。':'只承接已知事件与话题，不自行制造新事件。'} 不凭空改变地点，不让所有成员轮流报到。
 4. 近期已经说过的话不换个说法重发；不要固定问候、机械接龙或表演式自问自答。用户没回应时不反复追问。用户上次发言后，本插件已观察到 ${rec.rounds||0} 轮主动内容；达到本插件上限后留出空间。
-5. 有内容时只输出1至3个简短气泡，保留原系统 [消息]/[回复]/[语音]/[表情]/[图片] 姓名：正文 格式、语言与翻译设置。不要解释判断过程，不输出 [心声]、计划、报告或 JSON。不为主动而强制配图。
+5. 有话题能聊开时，让合适的成员互相接话、回应细节或追问，通常输出 3 至 ${groupMessageLimit} 个气泡。只有一两句说得通也可以收住。允许个别成员把一件有意思的事说完整，其他成员按性格回应，别把对话切成一串单字或表情。保留原系统 [消息]/[回复]/[语音]/[表情]/[图片] 姓名：正文 格式、语言与翻译设置。不要解释判断过程，不输出 [心声]、计划、报告或 JSON。不为主动而强制配图。
 ${cfg.realistic?'真人模式：结合成员各自作息、约定与前文进展，在末尾另起一行给出 [下次检查:分钟数]，15至720分钟；它是下次最早考虑发言的时间。原系统下次检查到来后仍可继续安静，此行不会发送到群里。':''}
 单纯过去了一段时间，不是新的聊天动机。\n`;}
  function rules(meta,rec){
@@ -190,7 +218,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    const tag=meta.kind==='group'&&/^(回复|语音|表情)$/.test(match[1])?match[1]:image?'图片':'消息';
    accepted.push('['+tag+'] '+(meta.kind==='group'?speaker:meta.char)+'：'+match[3].trim());
   }
-  return {text:accepted.slice(0,isMessageTest(meta)?1:meta.kind==='group'?3:2).join('\n'),reason:accepted.length?'content':valid&&repeated===valid?'duplicate':'format'};
+  return {text:accepted.slice(0,isMessageTest(meta)?1:meta.kind==='group'?groupMessageLimit:2).join('\n'),reason:accepted.length?'content':valid&&repeated===valid?'duplicate':'format'};
  }
  function rewriteReply(p,meta,depth=0,limit={sent:0}){
   if(!p||typeof p!=='object'||depth>3)return {body:p,known:false,has:false};
@@ -213,6 +241,14 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   if(String(init?.method||request?.method||'GET').toUpperCase()!=='POST')return original.call(this,input,init);
   let raw=init?.body;
   if(raw===undefined&&request){if(!/json/i.test(request.headers.get('content-type')||''))return original.call(this,input,init);try{raw=await request.clone().text();}catch{return original.call(this,input,init);}}
+  const url=String(request?.url||input);
+  if(typeof raw==='string'&&raw.includes('"group_activity"')&&/\/api\/continuous-hosting\/upsert(?:\?|$)/.test(url)){
+   try{
+    const task=JSON.parse(raw),groupId=task.descriptor?.groupId;
+    if(task.type==='group_activity'&&groupId&&groupEnabled(groupId))recordGroupCheck(groupId,'发现群聊持续托管请求。后端自行生成消息，这次网页未加规则。');
+   }catch{}
+   return original.call(this,input,init);
+  }
   if(typeof raw!=='string'||raw.length>2000000||!(raw.includes('Short Term Memory')&&raw.includes('本轮模式')||raw.includes('沉浸式虚拟群聊的导演/上帝视角')&&raw.includes('近期聊天记录')))return original.call(this,input,init);
   await loadBridge();
   let job;try{job=prepare(JSON.parse(raw));}catch{return original.call(this,input,init);}
@@ -227,11 +263,12 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   matched++;const {meta,rec}=job,testing=!!trial?.busy&&trial.key===meta.key;
   if(meta.kind==='group')groupMatched.set(meta.groupId,(groupMatched.get(meta.groupId)||0)+1);
   // Server-side scheduled delivery is not under this page's control: enhance new job prompts only.
-  const url=String(request?.url||input),scheduled=job.cloud&&/\/api\/schedule(?:\?|$)/.test(url);
+  const scheduled=job.cloud&&/\/api\/schedule(?:\?|$)/.test(url);
   const permit=automatic.get(meta.key),ownCheck=!!permit&&!permit.used&&cfg.realistic;
   const managed=meta.kind!=='group'&&cfg.realistic&&!!bridge&&!!navigator.locks?.request&&localStorage.getItem('noir_webpush_char_activity_enabled')!=='true';
   if(!scheduled&&!testing&&managed&&!ownCheck){note(meta.char+'：真人模式由本页安排时机，本次原定时未调用模型。');return emptyResponse();}
   if(!scheduled&&(pending.has(meta.key)||quietNow()||testing&&trial.requests>0||!testing&&((!ownCheck&&Date.now()<rec.next)||rec.rounds>=cfg.unanswered))){
+   if(meta.kind==='group')recordGroupCheck(meta.groupId,'已识别群漫谈。当前在冷却、勿扰或连续主动限制内，这次未调用模型。');
    note(meta.char+'：这次保持安静，未调用模型。');return emptyResponse();
   }
   if(ownCheck)permit.used=true;
@@ -242,8 +279,8 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   try{
    note(meta.char+'：结合上下文判断是否值得开口。');
    const response=await original.call(this,target,request?undefined:next);
-   if(!response.ok){if(testing){trial.phase='error';trial.message='聊天接口返回 HTTP '+response.status+'，请检查原系统 API 设置。';paintTrial();}note(meta.char+'：原接口返回错误，未重试。');return response;}
-   if(scheduled){note(meta.char+'：新云端任务已加入自然主动规则；云端送达不受本页冷却控制。');return response;}
+   if(!response.ok){if(meta.kind==='group')recordGroupCheck(meta.groupId,'群漫谈请求返回 HTTP '+response.status+'。');if(testing){trial.phase='error';trial.message='聊天接口返回 HTTP '+response.status+'，请检查原系统 API 设置。';paintTrial();}note(meta.char+'：原接口返回错误，未重试。');return response;}
+   if(scheduled){if(meta.kind==='group')recordGroupCheck(meta.groupId,'云端排队请求已带自然主动规则。');note(meta.char+'：新云端任务已加入自然主动规则；云端送达不受本页冷却控制。');return response;}
    let parsed;try{parsed=await response.clone().json();}catch{if(testing){trial.phase='error';trial.message='接口已返回，但当前返回格式未识别；请检查 API 返回设置。';paintTrial();}note('返回格式无法识别，保留原系统处理。');return response;}
    if(!active||!cfg.enabled)return response;
    const r=rewriteReply(parsed,meta);
@@ -253,6 +290,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
    rec.seen=Date.now();
    rec.next=Date.now()+60000*(cfg.realistic?(r.nextMinutes||45+Math.random()*75):(r.has?cfg.min+Math.random()*(cfg.max-cfg.min):5+Math.random()*10));
    if(r.has)rec.rounds++;
+   if(meta.kind==='group')recordGroupCheck(meta.groupId,r.has?'自然主动规则已用，本轮有消息交给 Roche。':'自然主动规则已用。'+noContent);
    save();note(meta.char+(r.has?'：返回了消息内容，交给原系统发送。':'：'+noContent));
    const headers=new Headers(response.headers);headers.delete('content-length');headers.delete('content-encoding');
    return new Response(JSON.stringify(r.body),{status:response.status,statusText:response.statusText,headers});
@@ -489,6 +527,11 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   if(!groups.length)setListPlaceholder(select,core?'暂无群聊':bridgePromise||!bridgeDetail?'正在读取群聊…':'未接入聊天数据');
   if([...select.options].some(option=>option.value===previous))select.value=previous;
   const group=groups.find(value=>String(value.id)===select.value);select.disabled=!groups.length;toggle.disabled=!group;toggle.checked=!!group&&groupEnabled(group.id);
+  const receipt=root.querySelector('[data-group-receipt]'),check=group&&groupChecks.get(String(group.id));
+  if(receipt){
+   receipt.hidden=!group;
+   receipt.textContent=check?`最近记录 · ${new Date(check.at).toLocaleString()} · ${check.result}`:'这个群还没有接入记录。免费检查只读取设置，群漫谈运行后才会有记录。';
+  }
   toggle.setAttribute('aria-label',group?'对群聊 '+(group.name||'此群')+' 启用自然主动':'对所选群聊启用自然主动');
   if(!group){hint.textContent=core?'系统暂未提供群聊。':'可点下方按钮重新读取。';return;}
   if(group.localSettings?.autonomousStrategy?.enabled){hint.textContent=(group.name||'此群')+'已启用系统「自主策略」。要使用插件，请关闭自主策略，再开启群漫谈。';return;}
@@ -575,7 +618,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
   root.innerHTML='<style>'+css+'</style><header class="ni-top"><div class="ni-icon">'+icon('sun')+'</div><div><h3>自然主动</h3><p class="ni-sub">有话再说，没话就安静</p></div><span class="ni-version">v'+VERSION+'</span></header>'+
   '<div class="ni-card ni-row"><div><h4>自然主动总开关</h4><p class="ni-hint">统一控制插件是否运行</p></div>'+toggle('enabled','启用自然主动')+'</div>'+
   '<div class="ni-card"><h4>联系人独立开关</h4><select data-contact-target aria-label="选择自然主动联系人" disabled></select><div class="ni-row ni-divider"><p class="ni-label">对这个 char 启用</p><label class="ni-switch"><input type="checkbox" role="switch" data-contact-enabled aria-label="对所选联系人启用自然主动" disabled><span></span></label></div><p class="ni-hint" data-contact-note></p><p class="ni-hint">每位联系人单独保存。普通模式、真人模式和测试都按这个开关生效。关闭后沿用该联系人的系统漫谈设置。</p></div>'+
-  '<div class="ni-card"><h4>群聊独立开关</h4><select data-group-target aria-label="选择自然主动群聊" disabled></select><div class="ni-row ni-divider"><p class="ni-label">对这个群启用</p><label class="ni-switch"><input type="checkbox" role="switch" data-group-enabled aria-label="对所选群聊启用自然主动" disabled><span></span></label></div><p class="ni-hint" data-group-note></p><button type="button" class="ni-btn" data-group-refresh>检查群聊接入 · 免费</button><p class="ni-hint">按群分别保存，与私聊开关独立。沿用系统群漫谈的检查时机和 API，不另开一套请求。普通模式使用随机冷却；真人模式按模型给出的时间等待，之后仍由系统群漫谈检查。当前版本的“测试发一条”用于下方私聊测试。</p></div>'+
+  '<div class="ni-card"><h4>群聊独立开关</h4><select data-group-target aria-label="选择自然主动群聊" disabled></select><div class="ni-row ni-divider"><p class="ni-label">对这个群启用</p><label class="ni-switch"><input type="checkbox" role="switch" data-group-enabled aria-label="对所选群聊启用自然主动" disabled><span></span></label></div><p class="ni-hint" data-group-note></p><button type="button" class="ni-btn" data-group-refresh>检查群聊接入 · 免费</button><p class="ni-hint" data-group-receipt role="status" hidden></p><p class="ni-hint">网页上的群漫谈沿用 Roche 的检查时机。后端自行生成的持续托管任务由后端控制。</p></div>'+
   '<div class="ni-card"><h4>相处节奏</h4><div class="ni-segment" role="group" aria-label="主动模式"><button type="button" data-mode="normal">普通模式</button><button type="button" data-mode="realistic">真人模式</button></div><p class="ni-mode-note" data-mode-note></p><div data-normal><div class="ni-timing"><label class="ni-num"><input type="number" data-key="min" min="5" max="720" aria-label="最短冷却分钟"><span>分钟</span></label><span class="ni-dash">至</span><label class="ni-num"><input type="number" data-key="max" min="5" max="1440" aria-label="最长冷却分钟"><span>分钟</span></label></div><p class="ni-hint">一次主动后，随机安静这么久</p></div><div class="ni-row ni-divider"><div><p class="ni-label">留一点空间</p><p class="ni-hint">你没回复时，最多主动几轮</p></div><label class="ni-num ni-limit"><input type="number" data-key="unanswered" min="1" max="5" aria-label="未回复最多主动轮数"><span>轮</span></label></div><div class="ni-row ni-divider"><div><p class="ni-label">日常小分享</p><p class="ni-hint">依据人设与场景，延伸生活小事</p></div>'+toggle('sharing','允许日常小分享')+'</div></div>'+
   '<div class="ni-card"><div class="ni-row"><div><h4 class="ni-quiet-title">'+icon('moon')+' 勿扰时间</h4><p class="ni-hint">按这台设备的时间，留一段安静</p></div>'+toggle('quiet','启用勿扰时间')+'</div><div data-quiet-body><div data-periods></div><button type="button" class="ni-add" data-add>＋ 新增时段</button><p class="ni-hint">支持跨午夜；起止相同表示全天勿扰</p></div></div>'+
   '<div class="ni-card" data-enabled="true"><div class="ni-row"><h4>检查与测试</h4><span class="ni-meta" data-count>已识别 '+matched+' 次检查</span></div><div class="ni-status"><i class="ni-dot"></i><p data-state aria-live="polite"></p></div><select data-target aria-label="选择试运行角色" hidden></select><div class="ni-report" data-report hidden></div><div class="ni-actions"><button type="button" class="ni-btn" data-inspect>检查接入 · 免费</button><button type="button" class="ni-btn ni-primary" data-test disabled>测试发一条</button></div><p class="ni-hint">明确要求模型生成一条文字，直接发到所选角色聊天。<br>会调用你的聊天模型，可能计费；不自动重试。</p><button type="button" class="ni-decision" data-decision disabled>模拟自然判断 · 可能保持安静</button><div class="ni-trial" data-trial role="status" hidden></div><details class="ni-help ni-response" data-response hidden><summary>本次模型返回 · 最多600字</summary><pre data-response-text></pre></details></div>'+
