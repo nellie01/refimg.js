@@ -1,4 +1,4 @@
-/* Roche 自然主动 v1.5.1
+/* Roche 自然主动 v1.5.2
  * Enhance browser Director DMs and group activity. Adaptive DM mode invokes the native generator;
  * planning and message generation share one request, without a separate planning call.
  * Native apps and already scheduled server jobs cannot be intercepted by this browser plugin.
@@ -6,7 +6,7 @@
 (() => {
  'use strict';
  window.RocheNaturalInitiative?.destroy?.();
- const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.1', original=window.fetch;
+ const KEY='roche.naturalInitiative.v1', CONTACT_KEY=KEY+'.contacts', GROUP_KEY=KEY+'.groups', VERSION='1.5.2', original=window.fetch;
  if(typeof original!=='function'||!window.RochePlugin?.register)return;
  const defaults={enabled:true,min:25,max:110,unanswered:2,quiet:false,periods:[{start:'01:00',end:'07:00'}],realistic:false,sharing:true};
  let saved;try{saved=JSON.parse(localStorage.getItem(KEY)||'{}');}catch{saved={};}
@@ -270,7 +270,7 @@ ${cfg.realistic?'真人模式已开启。结合角色当地时间、当前生活
  function isNativeState(state){return !!state&&typeof state==='object'&&Array.isArray(state.conversations)&&Array.isArray(state.contacts)&&Array.isArray(state.personas)&&state.messages&&typeof state.messages==='object';}
  const corePath=/\/ai-core-[\w-]+\.js$/;
  const loaderPath=/\/(?:index|access-bootstrap|App|verifiedRuntime|ChatSettings)-[\w-]+\.js$/;
- const verifiedBuilds={'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ'],'ai-core-D1y7ffXM.js':['w','dZ']};
+ const verifiedBuilds={'ai-core-XL_vD4_9.js':['w','dZ'],'ai-core-CQV3BCOz.js':['t','dV'],'ai-core-De7sMNqT.js':['w','dZ'],'ai-core-D1y7ffXM.js':['w','dZ']};
  function observedAssets(){
   const paths=[...document.querySelectorAll('script[src],link[href]')].map(el=>el.src||el.href);
   paths.push(...(performance.getEntriesByType?.('resource')||[]).map(entry=>entry.name));
